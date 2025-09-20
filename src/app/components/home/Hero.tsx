@@ -1,0 +1,48 @@
+import React from "react";
+import { Spotlight } from "../ui/Spotlight";
+import { GridBackgroundDemo } from "../ui/GridBackground";
+import { TextGenerateEffect } from "../ui/TextGenerateEffect";
+import MagicButton from "../ui/MagicButton";
+import { FaLocationArrow } from "react-icons/fa";
+
+const Hero = () => {
+  return (
+    <div className="relative w-screen h-screen overflow-hidden">
+      {" "}
+      <GridBackgroundDemo />
+      <Spotlight
+        className="top-10 -left-10 md:-top-10 md:left-10 sm:top-20 w-[250%] md:w-[160%]"
+        fill="white"
+      />
+      <Spotlight
+        className="-top-23 left-70 md:left-200 md:-top-20 sm:left-90 sm:-top-20 w-screen "
+        fill="purple"
+      />
+      <Spotlight
+        className="-top-30 left-80 md:left-230 md:-top-30 sm:left-100 sm:-top-30 w-screen "
+        fill="blue"
+      />{" "}
+      <div className="flex justify-center items-center relative h-full w-full">
+        <div className="flex flex-col items-center justify-center max-w-[89vw] md:max-w-[80vw] lg:max-w-[80vw]">
+          <h2 className="uppercase tracking-widest text-center text-xs text-blue-100">
+            Dynamic web magic with Next.js
+          </h2>
+          <TextGenerateEffect
+            words={"Hi, Welcome To My Portfolio"}
+            className="text-center text-3xl md:text-5xl lg:text-6xl py-2"
+          />
+          <p className="text-center text-xs uppercase tracking-wider text-blue-100 pt-1">
+            I am Khelifi Ayyoub, Cyber Security Engineer And Full Stack Dev
+          </p>
+          <MagicButton
+            title={"Show My Work"}
+            type={"button"}
+            icon={<FaLocationArrow />}
+          />
+        </div>
+      </div>
+    </div>
+  );
+};
+
+export default Hero;
