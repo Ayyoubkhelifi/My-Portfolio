@@ -75,8 +75,8 @@ export const TextGenerateEffect = memo<TextGenerateEffectProps>(
               key={`${word}-${idx}`}
               className={cn(
                 idx === 4
-                  ? "text-[#CBACF9] text-4xl md:text-5xl lg:text-6xl"
-                  : "text-white text-3xl md:text-4xl lg:text-5xl",
+                  ? "text-[#CBACF9] text-4xl md:text-5xl lg:text-7xl"
+                  : "text-white text-3xl md:text-4xl lg:text-6xl",
                 "px-1 inline-block will-change-transform" // Added will-change for better performance
               )}
               initial={{

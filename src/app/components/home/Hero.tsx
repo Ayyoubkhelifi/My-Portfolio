@@ -29,7 +29,7 @@ const Hero = () => {
           </h2>
           <TextGenerateEffect
             words={"Hi, Welcome To My Portfolio"}
-            className="text-center text-3xl md:text-5xl lg:text-6xl py-2"
+            className="text-center text-3xl md:text-5xl lg:text-6xl py-7"
           />
           <p className="text-center text-xs uppercase tracking-wider text-blue-100 pt-1">
             I am Khelifi Ayyoub, Cyber Security Engineer And Full Stack Dev
