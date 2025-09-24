@@ -16,7 +16,7 @@ const Grid = () => {
     // </section>
     // );
     <section id="about">
-      <BentoGrid className="w-full py-20">
+      <BentoGrid>
         {bentoGridItems.map((item, i) => (
           <BentoGridItem key={i} {...item} />
         ))}

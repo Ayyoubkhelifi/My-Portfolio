@@ -1,13 +1,17 @@
 "use client";
-import { BentoGridItemType } from "@/data/bentoGridItems";
-import { cn } from "@/lib/utils";
 import { useState } from "react";
 import { IoCopyOutline } from "react-icons/io5";
-import MagicButton from "./MagicButton";
-import { BackgroundGradientAnimation } from "./GradientBg";
-import animationData from "@/data/confetti.json";
-import GridGlobe from "./GridGlobe";
+
+// Also install this npm i --save-dev @types/react-lottie
 import Lottie from "react-lottie";
+
+import { cn } from "@/lib/utils";
+
+import { BackgroundGradientAnimation } from "./GradientBg";
+import GridGlobe from "./GridGlobe";
+import animationData from "@/data/confetti.json";
+import MagicButton from "./MagicButton";
+
 export const BentoGrid = ({
   className,
   children,
@@ -18,7 +22,8 @@ export const BentoGrid = ({
   return (
     <div
       className={cn(
-        "relative  mx-auto grid max-w-7xl grid-cols-1 gap-4 md:auto-rows-[18rem] md:grid-cols-3",
+        // change gap-4 to gap-8, change grid-cols-3 to grid-cols-5, remove md:auto-rows-[18rem], add responsive code
+        "grid grid-cols-1 md:grid-cols-6 lg:grid-cols-5 md:grid-row-7 gap-4 lg:gap-8 mx-auto",
         className
       )}
     >
@@ -28,15 +33,25 @@ export const BentoGrid = ({
 };
 
 export const BentoGridItem = ({
-  id,
   className,
-  imgClassName,
-  titleClassName,
-  img,
-  spareImg,
+  id,
   title,
   description,
-}: BentoGridItemType) => {
+  //   remove unecessary things here
+  img,
+  imgClassName,
+  titleClassName,
+  spareImg,
+}: {
+  className?: string;
+  id: number;
+  title?: string | React.ReactNode;
+  description?: string | React.ReactNode;
+  img?: string;
+  imgClassName?: string;
+  titleClassName?: string;
+  spareImg?: string;
+}) => {
   const leftLists = ["ReactJS", "Express", "Typescript"];
   const rightLists = ["VueJS", "NuxtJS", "GraphQL"];
 
