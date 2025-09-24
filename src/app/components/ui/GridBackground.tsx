@@ -1,9 +1,9 @@
-import { cn } from "@/app//lib/utils";
+import { cn } from "@/lib/utils";
 import React from "react";
 
 export function GridBackgroundDemo() {
   return (
-    <div className="absolute flex w-full items-center h-full justify-center bg-[#000319]">
+    <div className="absolute flex w-full items-center h-screen justify-center bg-[#000319]">
       <div
         className={cn(
           "absolute inset-0",

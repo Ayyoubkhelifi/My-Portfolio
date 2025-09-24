@@ -6,7 +6,7 @@ import {
   stagger,
   useAnimate,
 } from "motion/react";
-import { cn } from "@/app//lib/utils";
+import { cn } from "@/lib/utils";
 
 interface TextGenerateEffectProps {
   words: string;

@@ -7,7 +7,7 @@ import { FaLocationArrow } from "react-icons/fa";
 
 const Hero = () => {
   return (
-    <div className="relative w-screen h-screen overflow-hidden">
+    <div className="w-full h-screen">
       {" "}
       <GridBackgroundDemo />
       <Spotlight
@@ -22,23 +22,30 @@ const Hero = () => {
         className="-top-30 left-80 md:left-230 md:-top-30 sm:left-100 sm:-top-30 w-screen "
         fill="blue"
       />{" "}
-      <div className="flex justify-center items-center relative h-full w-full">
-        <div className="flex flex-col items-center justify-center max-w-[89vw] md:max-w-[80vw] lg:max-w-[80vw]">
-          <h2 className="uppercase tracking-widest text-center text-xs text-blue-100">
-            Dynamic web magic with Next.js
-          </h2>
-          <TextGenerateEffect
-            words={"Hi, Welcome To My Portfolio"}
-            className="text-center text-3xl md:text-5xl lg:text-6xl py-7"
-          />
-          <p className="text-center text-xs uppercase tracking-wider text-blue-100 pt-1">
-            I am Khelifi Ayyoub, Cyber Security Engineer And Full Stack Dev
-          </p>
-          <MagicButton
-            title={"Show My Work"}
-            type={"button"}
-            icon={<FaLocationArrow />}
-          />
+      <div className="w-full h-full flex justify-center items-center">
+        <div className="flex flex-col items-center justify-around h-full max-w-[89vw] md:max-w-[80vw] lg:max-w-[80vw]">
+          <div className="flex flex-col items-center justify-end-safe h-full">
+            <h2 className="uppercase tracking-widest text-center text-xs text-blue-100 z-20">
+              Dynamic web magic with Next.js
+            </h2>
+            <TextGenerateEffect
+              words={"Hi, Welcome To My Portfolio"}
+              className="text-center text-3xl md:text-5xl lg:text-6xl py-7"
+            />
+            <p className="text-center text-xs uppercase tracking-wider text-blue-100 pt-1 z-20">
+              I am Khelifi Ayyoub, Cyber Security Engineer And Full Stack Dev
+            </p>
+          </div>
+          <div className="h-full flex items-center justify-center">
+            {" "}
+            <a href="#about">
+              <MagicButton
+                title={"Show My Work"}
+                type={"button"}
+                icon={<FaLocationArrow />}
+              />
+            </a>
+          </div>
         </div>
       </div>
     </div>
