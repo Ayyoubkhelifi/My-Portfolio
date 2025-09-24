@@ -9,7 +9,7 @@ const MagicButton = ({
   position,
 }: {
   title: string;
-  position: string;
+  position?: string;
   type?: "submit" | "reset" | "button";
   icon?: ReactNode;
   handleClick?: () => void;
