@@ -7,7 +7,7 @@ import { FaLocationArrow } from "react-icons/fa";
 
 const Hero = () => {
   return (
-    <div className="w-full h-screen">
+    <div className="relative w-full h-screen mb-20">
       {" "}
       <GridBackgroundDemo />
       <Spotlight
