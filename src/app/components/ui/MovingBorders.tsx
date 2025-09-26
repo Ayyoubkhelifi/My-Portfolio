@@ -10,37 +10,38 @@ import {
 import { useRef } from "react";
 import { cn } from "@/lib/utils";
 
-export function Button({
+type ButtonProps<T extends React.ElementType = "button"> = {
+  borderRadius?: string;
+  children: React.ReactNode;
+  as?: T;
+  containerClassName?: string;
+  borderClassName?: string;
+  duration?: number;
+  className?: string;
+} & Omit<React.ComponentPropsWithoutRef<T>, "as" | "children">;
+
+export function Button<T extends React.ElementType = "button">({
   borderRadius = "1.75rem",
   children,
-  as: Component = "button",
+  as: Component = "button" as T,
   containerClassName,
   borderClassName,
   duration,
   className,
   ...otherProps
-}: {
-  borderRadius?: string;
-  children: React.ReactNode;
-  as?: any;
-  containerClassName?: string;
-  borderClassName?: string;
-  duration?: number;
-  className?: string;
-  [key: string]: any;
-}) {
-  return (
-    <Component
-      className={cn(
+}: ButtonProps<T>) {
+  return React.createElement(
+    Component,
+    {
+      className: cn(
         // remove h-16 w-40, add  md:col-span-2
         "bg-transparent relative text-xl p-[1px] overflow-hidden md:col-span-2 md:row-span-1",
         containerClassName
-      )}
-      style={{
-        borderRadius: borderRadius,
-      }}
-      {...otherProps}
-    >
+      ),
+      style: { borderRadius: borderRadius },
+      ...(otherProps as Omit<React.ComponentPropsWithoutRef<T>, "children">),
+    } as React.ComponentPropsWithoutRef<T>,
+    <>
       <div
         className="absolute inset-0 rounde-[1.75rem]"
         style={{ borderRadius: `calc(${borderRadius} * 0.96)` }}
@@ -66,9 +67,16 @@ export function Button({
       >
         {children}
       </div>
-    </Component>
+    </>
   );
 }
+
+export type MovingBorderProps = React.SVGProps<SVGSVGElement> & {
+  children: React.ReactNode;
+  duration?: number;
+  rx?: string | number;
+  ry?: string | number;
+};
 
 export const MovingBorder = ({
   children,
@@ -76,14 +84,8 @@ export const MovingBorder = ({
   rx,
   ry,
   ...otherProps
-}: {
-  children: React.ReactNode;
-  duration?: number;
-  rx?: string;
-  ry?: string;
-  [key: string]: any;
-}) => {
-  const pathRef = useRef<any>(null);
+}: MovingBorderProps) => {
+  const pathRef = useRef<SVGRectElement | null>(null);
   const progress = useMotionValue<number>(0);
 
   useAnimationFrame((time) => {
@@ -94,14 +96,15 @@ export const MovingBorder = ({
     }
   });
 
-  const x = useTransform(
-    progress,
-    (val) => pathRef.current?.getPointAtLength(val).x
-  );
-  const y = useTransform(
-    progress,
-    (val) => pathRef.current?.getPointAtLength(val).y
-  );
+  const x = useTransform(progress, (val) => {
+    if (!pathRef.current) return 0;
+    return pathRef.current.getPointAtLength(val).x;
+  });
+
+  const y = useTransform(progress, (val) => {
+    if (!pathRef.current) return 0;
+    return pathRef.current.getPointAtLength(val).y;
+  });
 
   const transform = useMotionTemplate`translateX(${x}px) translateY(${y}px) translateX(-50%) translateY(-50%)`;
 
