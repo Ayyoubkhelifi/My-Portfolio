@@ -51,3 +51,16 @@
   --color-zinc-800: #27272a;
   --breakpoint-xs: 30rem;
 }
+.heading {
+  text-align: center; /* text-center */
+  font-size: 1.875rem; /* text-3xl (30px) */
+  line-height: 2.25rem; /* default line-height for text-3xl */
+}
+
+@media (min-width: 640px) {
+  /* sm: breakpoint (≥640px) */
+  .heading {
+    font-size: 3rem; /* text-5xl (48px) */
+    line-height: 1; /* default line-height for text-5xl */
+  }
+}
