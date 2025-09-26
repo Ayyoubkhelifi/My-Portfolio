@@ -93,9 +93,14 @@ export const BentoGridItem = ({
         <div className="w-full h-full absolute">
           {img && (
             <Image
+              width={100}
+              height={100}
               src={img}
               alt={img}
-              className={cn(imgClassName, "object-cover object-center ")}
+              className={cn(
+                imgClassName,
+                "object-cover object-center w-full h-full"
+              )}
             />
           )}
         </div>
@@ -106,6 +111,8 @@ export const BentoGridItem = ({
         >
           {spareImg && (
             <Image
+              width={100}
+              height={100}
               src={spareImg}
               alt={spareImg}
               //   width={220}
