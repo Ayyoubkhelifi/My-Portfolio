@@ -6,6 +6,7 @@ import RecentProjects from "./components/home/RecentProjects";
 import Clients from "./components/home/Clients";
 import Experience from "./components/home/Experience";
 import Approach from "./components/home/Approach";
+import Footer from "./components/home/Footer";
 
 export default function Home() {
   return (
@@ -18,6 +19,7 @@ export default function Home() {
         <Clients />
         <Experience />
         <Approach />
+        <Footer />
       </div>
     </main>
   );
