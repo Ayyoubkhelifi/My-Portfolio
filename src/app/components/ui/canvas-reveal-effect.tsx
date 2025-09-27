@@ -4,14 +4,7 @@ import { Canvas, useFrame, useThree } from "@react-three/fiber";
 import React, { useMemo, useRef, useCallback } from "react";
 import * as THREE from "three";
 
-export const CanvasRevealEffect = ({
-  animationSpeed = 0.4,
-  opacities = [0.3, 0.3, 0.3, 0.5, 0.5, 0.5, 0.8, 0.8, 0.8, 1],
-  colors = [[0, 255, 255]],
-  containerClassName,
-  dotSize,
-  showGradient = true,
-}: {
+interface CanvasRevealEffectProps {
   /**
    * 0.1 - slower
    * 1.0 - faster
@@ -22,6 +15,15 @@ export const CanvasRevealEffect = ({
   containerClassName?: string;
   dotSize?: number;
   showGradient?: boolean;
+}
+
+export const CanvasRevealEffect: React.FC<CanvasRevealEffectProps> = ({
+  animationSpeed = 0.4,
+  opacities = [0.3, 0.3, 0.3, 0.5, 0.5, 0.5, 0.8, 0.8, 0.8, 1],
+  colors = [[0, 255, 255]],
+  containerClassName,
+  dotSize,
+  showGradient = true,
 }) => {
   return (
     <div className={cn("h-full relative bg-white w-full", containerClassName)}>
@@ -189,19 +191,21 @@ type Uniforms = {
   };
 };
 
-const ShaderMaterial = ({
-  source,
-  uniforms,
-  maxFps = 60,
-}: {
+interface ShaderMaterialProps {
   source: string;
   hovered?: boolean;
   maxFps?: number;
   uniforms: Uniforms;
+}
+
+const ShaderMaterial: React.FC<ShaderMaterialProps> = ({
+  source,
+  uniforms,
+  maxFps = 60,
 }) => {
   const { size } = useThree();
   const ref = useRef<THREE.Mesh>(null);
-  const lastFrameTimeRef = useRef(0);
+  const lastFrameTimeRef = useRef<number>(0);
 
   useFrame(({ clock }) => {
     if (!ref.current) return;
@@ -212,42 +216,42 @@ const ShaderMaterial = ({
     lastFrameTimeRef.current = timestamp;
 
     const material = ref.current.material as THREE.ShaderMaterial;
-    const timeLocation = material.uniforms.u_time;
+    const timeLocation = material.uniforms.u_time as THREE.IUniform<number>;
     timeLocation.value = timestamp;
   });
 
-  const getUniforms = useCallback(() => {
-    const preparedUniforms: Record<string, { value: unknown; type?: string }> =
-      {};
+  const getUniforms = useCallback((): Record<string, THREE.IUniform> => {
+    const preparedUniforms: Record<string, THREE.IUniform> = {};
 
     for (const uniformName in uniforms) {
       const uniform = uniforms[uniformName];
 
       switch (uniform.type) {
         case "uniform1f":
-          preparedUniforms[uniformName] = { value: uniform.value, type: "1f" };
+          preparedUniforms[uniformName] = {
+            value: uniform.value as number,
+          };
           break;
         case "uniform3f":
           preparedUniforms[uniformName] = {
             value: new THREE.Vector3().fromArray(uniform.value as number[]),
-            type: "3f",
           };
           break;
         case "uniform1fv":
-          preparedUniforms[uniformName] = { value: uniform.value, type: "1fv" };
+          preparedUniforms[uniformName] = {
+            value: uniform.value as number[],
+          };
           break;
         case "uniform3fv":
           preparedUniforms[uniformName] = {
             value: (uniform.value as number[][]).map((v: number[]) =>
               new THREE.Vector3().fromArray(v)
             ),
-            type: "3fv",
           };
           break;
         case "uniform2f":
           preparedUniforms[uniformName] = {
             value: new THREE.Vector2().fromArray(uniform.value as number[]),
-            type: "2f",
           };
           break;
         default:
@@ -256,7 +260,7 @@ const ShaderMaterial = ({
       }
     }
 
-    preparedUniforms["u_time"] = { value: 0, type: "1f" };
+    preparedUniforms["u_time"] = { value: 0 };
     preparedUniforms["u_resolution"] = {
       value: new THREE.Vector2(size.width * 2, size.height * 2),
     };
@@ -298,6 +302,12 @@ const ShaderMaterial = ({
   );
 };
 
+interface ShaderProps {
+  source: string;
+  uniforms: Uniforms;
+  maxFps?: number;
+}
+
 const Shader: React.FC<ShaderProps> = ({ source, uniforms, maxFps = 60 }) => {
   return (
     <Canvas className="absolute inset-0  h-full w-full">
@@ -305,9 +315,3 @@ const Shader: React.FC<ShaderProps> = ({ source, uniforms, maxFps = 60 }) => {
     </Canvas>
   );
 };
-
-interface ShaderProps {
-  source: string;
-  uniforms: Uniforms;
-  maxFps?: number;
-}
