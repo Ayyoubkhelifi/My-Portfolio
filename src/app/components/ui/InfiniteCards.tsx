@@ -2,6 +2,7 @@
 
 import { cn } from "@/lib/utils";
 import React, { useEffect, useState } from "react";
+import Image from "next/image";
 
 export const InfiniteMovingCards = ({
   items,
@@ -25,6 +26,8 @@ export const InfiniteMovingCards = ({
 
   useEffect(() => {
     addAnimation();
+    // addAnimation clones children into the DOM and is intentionally executed only on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
   const [start, setStart] = useState(false);
   function addAnimation() {
@@ -116,7 +119,7 @@ export const InfiniteMovingCards = ({
               <div className="relative z-20 mt-6 flex flex-row items-center">
                 {/* add this div for the profile img */}
                 <div className="me-3">
-                  <img src="/profile.webp" alt="profile" width={50} height={50} />
+                  <Image src="/profile.webp" alt="profile" width={50} height={50} />
                 </div>
                 <span className="flex flex-col gap-1">
                   {/* change text color, font-normal to font-bold, text-xl */}

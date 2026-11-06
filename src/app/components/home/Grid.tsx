@@ -1,20 +1,9 @@
 import React from "react";
 import { BentoGrid, BentoGridItem } from "../ui/BentoGrid";
-import { bentoGridItems, BentoGridItemType } from "@/data/bentoGridItems";
+import { bentoGridItems } from "@/data/bentoGridItems";
 
 const Grid = () => {
   return (
-    // <section id="about">
-    //   <div className="min-h-screen w-full flex items-center justify-center">
-    //     {" "}
-    //     <BentoGrid>
-    //       {bentoGridItems.map((item: BentoGridItemType) => (
-    //         <BentoGridItem key={item.id} {...item} />
-    //       ))}
-    //     </BentoGrid>
-    //   </div>
-    // </section>
-    // );
     <section id="about">
       <BentoGrid>
         {bentoGridItems.map((item, i) => (
