@@ -42,3 +42,6 @@ Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/bui
 Live demo: **https://ayyoub-khelifi.vercel.app/**
 
 Visit the link above to see the deployed portfolio site. The badge shows the current availability of the live site and links directly to it so visitors on GitHub can open the demo with one click.
+
+### First-Visit Intro Experience
+This portfolio features an interactive "Swarm Rebuild" construction intro on first visit, where multi-cursor agents construct the live page elements. Visual experience inspired by `swarm-cursors` (Dhvanil Patel). Skip anytime with `Esc` or the on-screen controls, or replay via `?replay=1`.

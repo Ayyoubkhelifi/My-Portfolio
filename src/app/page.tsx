@@ -7,10 +7,13 @@ import Clients from "./components/home/Clients";
 import Experience from "./components/home/Experience";
 import Approach from "./components/home/Approach";
 import Footer from "./components/home/Footer";
+import SwarmIntroLoader from "./components/swarm/SwarmIntroLoader";
 
 export default function Home() {
   return (
     <main className="relative bg-black-100 flex flex-col justify-center items-center overflow-hidden mx-auto min-h-screen ">
+      {/* Swarm Rebuild intro: client-only, lazy loaded, never blocks SSR or LCP */}
+      <SwarmIntroLoader />
       <div className="w-full px-10">
         <FloatingNav navItems={navItems} />
         <Hero />
