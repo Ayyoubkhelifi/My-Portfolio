@@ -3,7 +3,7 @@ import { Spotlight } from "../ui/Spotlight";
 import { GridBackgroundDemo } from "../ui/GridBackground";
 import { TextGenerateEffect } from "../ui/TextGenerateEffect";
 import MagicButton from "../ui/MagicButton";
-import { FaLocationArrow } from "react-icons/fa";
+import { FaLocationArrow } from "react-icons/fa6";
 
 const Hero = () => {
   return (

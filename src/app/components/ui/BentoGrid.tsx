@@ -1,17 +1,65 @@
 "use client";
-import { useState } from "react";
+import { useEffect, useState, type ComponentType } from "react";
 import { IoCopyOutline } from "react-icons/io5";
 import Image from "next/image";
-
-// Also install this npm i --save-dev @types/react-lottie
-import Lottie from "react-lottie";
 
 import { cn } from "@/lib/utils";
 
 import { BackgroundGradientAnimation } from "./GradientBg";
 import GridGlobe from "./GridGlobe";
-import animationData from "@/data/confetti.json";
 import MagicButton from "./MagicButton";
+
+type LottieComponentProps = {
+  options: {
+    loop: boolean;
+    autoplay: boolean;
+    animationData: unknown;
+    rendererSettings: {
+      preserveAspectRatio: string;
+    };
+  };
+  height: number;
+  width: number;
+};
+
+type ConfettiBundle = {
+  Lottie: ComponentType<LottieComponentProps>;
+  animationData: unknown;
+};
+
+// Lottie-web (~300kB minified) and the confetti animation data (~600kB) are
+// only needed after clicking "copy email" — load them lazily instead of
+// including them in the initial bundle.
+let confettiBundlePromise: Promise<ConfettiBundle> | null = null;
+function loadConfettiBundle(): Promise<ConfettiBundle> {
+  confettiBundlePromise ??= Promise.all([
+    import("react-lottie"),
+    import("@/data/confetti.json"),
+  ]).then(([lottieModule, animationModule]) => ({
+    Lottie: lottieModule.default as ComponentType<LottieComponentProps>,
+    animationData: animationModule.default,
+  }));
+  return confettiBundlePromise;
+}
+
+// Keeps the render options identical to the previous inline Lottie usage.
+function renderConfetti(confetti: ConfettiBundle) {
+  const ConfettiLottie = confetti.Lottie;
+  return (
+    <ConfettiLottie
+      options={{
+        loop: false,
+        autoplay: true,
+        animationData: confetti.animationData,
+        rendererSettings: {
+          preserveAspectRatio: "xMidYMid slice",
+        },
+      }}
+      height={200}
+      width={400}
+    />
+  );
+}
 
 export const BentoGrid = ({
   className,
@@ -57,20 +105,39 @@ export const BentoGridItem = ({
   const rightLists = ["VueJS", "NuxtJS", "GraphQL"];
 
   const [copied, setCopied] = useState(false);
+  const [confetti, setConfetti] = useState<ConfettiBundle | null>(null);
 
-  const defaultOptions = {
-    loop: copied,
-    autoplay: copied,
-    animationData: animationData,
-    rendererSettings: {
-      preserveAspectRatio: "xMidYMid slice",
-    },
-  };
+  // Preload the confetti bundle during browser idle time so the very first
+  // click still feels instant (same behavior as before, without blocking the
+  // initial page load).
+  useEffect(() => {
+    const w = window as Window & {
+      requestIdleCallback?: (cb: () => void) => number;
+      cancelIdleCallback?: (id: number) => void;
+    };
+    if (typeof w.requestIdleCallback === "function") {
+      const id = w.requestIdleCallback(() => {
+        loadConfettiBundle().then(setConfetti).catch(() => {});
+      });
+      return () => {
+        w.cancelIdleCallback?.(id);
+      };
+    }
+    const timeout = setTimeout(() => {
+      loadConfettiBundle().then(setConfetti).catch(() => {});
+    }, 2000);
+    return () => clearTimeout(timeout);
+  }, []);
 
   const handleCopy = () => {
     const text = "abderrahmenedz12@gmail.com";
     navigator.clipboard.writeText(text);
     setCopied(true);
+    loadConfettiBundle()
+      .then(setConfetti)
+      .catch(() => {
+        /* animation data failed to load; copy still works */
+      });
     setTimeout(() => {
       setCopied(false);
     }, 3000);
@@ -193,20 +260,9 @@ export const BentoGridItem = ({
                 }`}
               >
                 {/* <img src="/confetti.gif" alt="confetti" /> */}
-                {copied && (
-                  <Lottie
-                    options={{
-                      loop: false,
-                      autoplay: true,
-                      animationData: animationData,
-                      rendererSettings: {
-                        preserveAspectRatio: "xMidYMid slice",
-                      },
-                    }}
-                    height={200}
-                    width={400}
-                  />
-                )}
+                {copied &&
+                  confetti &&
+                  renderConfetti(confetti)}
               </div>
 
               <MagicButton

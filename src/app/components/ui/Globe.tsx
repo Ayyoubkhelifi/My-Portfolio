@@ -24,8 +24,6 @@ declare module "@react-three/fiber" {
 extend({ ThreeGlobe: ThreeGlobe });
 
 const RING_PROPAGATION_SPEED = 3;
-const aspect = 1.2;
-const cameraZ = 300;
 
 type Position = {
   order: number;
@@ -68,9 +66,20 @@ interface WorldProps {
   data: Position[];
 }
 
-const numbersOfRings = [0];
+// Fix: three-globe accessors receive the data datum as the first argument,
+// NOT an index. Indexing `arcs[i]` with a datum object is undefined -> crash
+// ("Cannot read properties of undefined (reading 'color')") on every rebuild.
+const ARC_STROKES = [0.32, 0.28, 0.3];
 
-export function Globe({ globeConfig, data }: WorldProps) {
+const aspect = 1.2;
+const cameraZ = 300;
+// stable camera instance (reused instead of re-created on every render)
+const WORLD_CAMERA = new PerspectiveCamera(50, aspect, 180, 1800);
+// stable light positions
+const LIGHT_POSITION_LEFT = new Vector3(-400, 100, 400);
+const LIGHT_POSITION_TOP = new Vector3(-200, 500, 200);
+
+export function Globe({ globeConfig, data, active = true }: WorldProps & { active?: boolean }) {
   const globeRef = useRef<ThreeGlobe | null>(null);
   const groupRef = useRef<Group | null>(null);
   const [isInitialized, setIsInitialized] = useState(false);
@@ -132,7 +141,6 @@ export function Globe({ globeConfig, data }: WorldProps) {
     const points = [];
     for (let i = 0; i < arcs.length; i++) {
       const arc = arcs[i];
-      const rgb = hexToRgb(arc.color) as { r: number; g: number; b: number };
       points.push({
         size: defaultProps.pointSize,
         order: arc.order,
@@ -176,9 +184,9 @@ export function Globe({ globeConfig, data }: WorldProps) {
       .arcEndLng((d) => (d as { endLng: number }).endLng * 1)
       // ThreeGlobe's ObjAccessor for arcColor expects a signature like (t: number) => string
       // so use the `arcs` array and return the color by index to match the type.
-      .arcColor((i: number) => arcs[i].color)
+      .arcColor((d: unknown) => (d as { color: string }).color)
       .arcAltitude((e) => (e as { arcAlt: number }).arcAlt * 1)
-      .arcStroke(() => [0.32, 0.28, 0.3][Math.round(Math.random() * 2)])
+      .arcStroke((_d: unknown, i?: number) => ARC_STROKES[(i ?? 0) % ARC_STROKES.length])
       .arcDashLength(defaultProps.arcLength)
       .arcDashInitialGap((e) => (e as { order: number }).order * 1)
       .arcDashGap(15)
@@ -213,9 +221,10 @@ export function Globe({ globeConfig, data }: WorldProps) {
     defaultProps.maxRings,
   ]);
 
-  // Handle rings animation with cleanup
+  // Handle rings animation with cleanup. Skipped entirely while the globe is
+  // off-screen so the interval/timers don't run in the background.
   useEffect(() => {
-    if (!globeRef.current || !isInitialized || !data) return;
+    if (!globeRef.current || !isInitialized || !data || !active) return;
 
     const interval = setInterval(() => {
       if (!globeRef.current) return;
@@ -240,7 +249,7 @@ export function Globe({ globeConfig, data }: WorldProps) {
     return () => {
       clearInterval(interval);
     };
-  }, [isInitialized, data]);
+  }, [isInitialized, data, active]);
 
   return <group ref={groupRef} />;
 }
@@ -257,28 +266,40 @@ export function WebGLRendererConfig() {
   return null;
 }
 
-export function World(props: WorldProps) {
-  const { globeConfig } = props;
-  const scene = new Scene();
-  scene.fog = new Fog(0xffffff, 400, 2000);
+export function World({
+  globeConfig,
+  data,
+  active = true,
+  frameloop = "demand" as "demand" | "always",
+}: WorldProps & { active?: boolean; frameloop?: "demand" | "always" }) {
+  const sceneRef = useRef<Scene | null>(null);
+  if (!sceneRef.current) {
+    const scene = new Scene();
+    scene.fog = new Fog(0xffffff, 400, 2000);
+    sceneRef.current = scene;
+  }
   return (
-    <Canvas scene={scene} camera={new PerspectiveCamera(50, aspect, 180, 1800)}>
+    <Canvas
+      scene={sceneRef.current}
+      camera={WORLD_CAMERA}
+      frameloop={frameloop}
+    >
       <WebGLRendererConfig />
       <ambientLight color={globeConfig.ambientLight} intensity={0.6} />
       <directionalLight
         color={globeConfig.directionalLeftLight}
-        position={new Vector3(-400, 100, 400)}
+        position={LIGHT_POSITION_LEFT}
       />
       <directionalLight
         color={globeConfig.directionalTopLight}
-        position={new Vector3(-200, 500, 200)}
+        position={LIGHT_POSITION_TOP}
       />
       <pointLight
         color={globeConfig.pointLight}
-        position={new Vector3(-200, 500, 200)}
+        position={LIGHT_POSITION_TOP}
         intensity={0.8}
       />
-      <Globe {...props} />
+      <Globe globeConfig={globeConfig} data={data} active={active} />
       <OrbitControls
         enablePan={false}
         enableZoom={false}

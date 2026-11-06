@@ -3,6 +3,11 @@ import React from "react";
 import { workExperience } from "@/data/workExperience";
 import { Button } from "../ui/MovingBorders";
 
+// Border animation durations were previously re-randomized on every render
+// (and differently between server and client). They are now randomized once
+// per page load — same visual spirit, stable output.
+const durations = workExperience.map(() => Math.floor(Math.random() * 10000) + 10000);
+
 const Experience = () => {
   return (
     <div className="py-20 w-full">
@@ -11,11 +16,11 @@ const Experience = () => {
       </h1>
 
       <div className="w-full mt-12 grid lg:grid-cols-4 grid-cols-1 gap-10">
-        {workExperience.map((card) => (
+        {workExperience.map((card, index) => (
           <Button
             key={card.id}
             //   random duration will be fun , I think , may be not
-            duration={Math.floor(Math.random() * 10000) + 10000}
+            duration={durations[index]}
             borderRadius="1.75rem"
             style={{
               //   add these two
@@ -32,7 +37,11 @@ const Experience = () => {
             <div className="flex lg:flex-row flex-col lg:items-center p-3 py-6 md:p-5 lg:p-10 gap-2">
               <img
                 src={card.thumbnail}
-                alt={card.thumbnail}
+                alt={`${card.title} logo`}
+                width={card.thumbnailWidth}
+                height={card.thumbnailHeight}
+                loading="lazy"
+                decoding="async"
                 className="lg:w-32 md:w-20 w-16"
               />
               <div className="lg:ms-5">

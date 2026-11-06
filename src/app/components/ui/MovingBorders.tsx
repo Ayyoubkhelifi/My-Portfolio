@@ -6,8 +6,8 @@ import {
   useMotionTemplate,
   useMotionValue,
   useTransform,
-} from "framer-motion";
-import { useRef } from "react";
+} from "motion/react";
+import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 
 type ButtonProps<T extends React.ElementType = "button"> = {
@@ -87,9 +87,28 @@ export const MovingBorder = ({
 }: MovingBorderProps) => {
   const pathRef = useRef<SVGRectElement | null>(null);
   const progress = useMotionValue<number>(0);
+  // getTotalLength() is expensive; cache it and only recompute when the
+  // element's size actually changes instead of on every animation frame.
+  const pathLengthRef = useRef<number>(0);
+
+  useEffect(() => {
+    const el = pathRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+
+    const measure = () => {
+      pathLengthRef.current = 0;
+    };
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+
+    return () => observer.disconnect();
+  }, []);
 
   useAnimationFrame((time) => {
-    const length = pathRef.current?.getTotalLength();
+    if (!pathLengthRef.current) {
+      pathLengthRef.current = pathRef.current?.getTotalLength() ?? 0;
+    }
+    const length = pathLengthRef.current;
     if (length) {
       const pxPerMillisecond = length / duration;
       progress.set((time * pxPerMillisecond) % length);
