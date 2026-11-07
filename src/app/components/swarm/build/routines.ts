@@ -1,366 +1,323 @@
 /**
- * routines.ts — Per-type construction animation routines.
+ * routines.ts — per-task construction choreography as generators.
  *
- * Each exported function is a generator factory conforming to the RoutineFn
- * signature. The master clock calls gen.next(dt) each frame with dt in
- * seconds (already tempo-scaled by the scheduler).
+ * Every routine is a generator factory. The engine's master clock drives
+ * `gen.next(scaledDt)` each frame; `yield` returns the (tempo-scaled)
+ * delta in seconds. Routines continuously hand cursor targets back to
+ * the engine, so the cursor motion stays spring-interpolated even
+ * between frames (no snapping, no per-frame tweens with timers).
  *
- * Generator protocol:
- *   - yield: suspend until next frame
- *   - return: routine complete
- *   - All timekeeping via accumulated dt (no setTimeout)
- *
- * Per §4.5 of the plan:
- *   - rect/container: selection rectangle grows → fill → border → shadow
- *   - text: type characters with per-char opacity+y-offset; caret blink
- *   - image: frame drop → clip-path inset() sweep → shadow/radius
- *   - svg: opacity+scale(0.94→1); stroke-dash draw for ≤2kB stroke paths
- *   - clip-reveal: foreign-object paint clone fade-in
- *   - group-reveal: whole subtree fade+unmask
+ * `yield* wait(s)` suspends for s seconds of scaled time.
  */
 
-import type { ElementRecord } from "../capture/classify";
-import type { RoutineFn } from "./scheduler";
-import { registerRoutine } from "./scheduler";
+import type { SwarmItem } from "../capture/model";
+import type { AgentSwarm } from "../agents/agents";
+import { View } from "./overlay";
+import type { SoundEngine } from "../fx/sound";
 
-// ─── Easing helpers ───────────────────────────────────────────────────────────
+// ─── Easing ───────────────────────────────────────────────────────────────────
 
-function easeOutCubic(t: number): number {
-  return 1 - Math.pow(1 - t, 3);
-}
+const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
+const clamp01 = (t: number) => Math.max(0, Math.min(1, t));
 
-function easeOutQuart(t: number): number {
-  return 1 - Math.pow(1 - t, 4);
-}
-
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-
-// ─── Shared timing accumulator helper ────────────────────────────────────────
-
-function* waitSeconds(seconds: number): Generator<void, void, number> {
+/** Yield-looper: suspends until `seconds` of scaled time has elapsed. */
+export function* wait(seconds: number): Generator<number, void, number> {
   let elapsed = 0;
   while (elapsed < seconds) {
-    const dt: number = yield;
+    const dt: number = yield 0;
     elapsed += dt;
   }
 }
 
-// ─── Rect / Container routine ─────────────────────────────────────────────────
+// ─── Routine context ──────────────────────────────────────────────────────────
 
-/**
- * Swarm Rebuild signature drag-draw animation for containers.
- *
- * Phase 1 (drag): Selection rectangle (dashed outline + 8 handles) grows
- *   from one corner to the opposite corner as the cursor "drags".
- * Phase 2 (fill): Background fill fades to captured color/gradient.
- * Phase 3 (border): Border draws itself via stroke-dash interpolation; radius appears.
- * Phase 4 (shadow): Box-shadow eases in last.
- */
-function* rectRoutine(
-  record: ElementRecord,
-  nodeEl: HTMLElement | null,
-  _agentIdx: number,
-  onMove: (x: number, y: number, type: string) => void,
-  onClick: (x: number, y: number) => void
-): Generator<void, void, number> {
-  if (!nodeEl) return;
-
-  const { rect, paint } = record;
-
-  // Duration based on element size (larger → longer)
-  const area = rect.width * rect.height;
-  const dragDuration = Math.min(0.3 + Math.sqrt(area) * 0.0008, 1.4);
-  const fillDuration = 0.25;
-  const borderDuration = 0.2;
-  const shadowDuration = 0.15;
-
-  // --- Phase 1: Selection drag ---
-  // The agent cursor moves from (rect.left, rect.top) to (rect.right, rect.bottom)
-  onClick(rect.left, rect.top); // initial click burst
-  onMove(rect.left, rect.top, "crosshair");
-
-  // Create a selection outline element that grows
-  const selEl = document.createElement("div");
-  selEl.style.cssText = `
-    position: absolute;
-    left: ${rect.left}px;
-    top: ${rect.top}px;
-    width: 0px;
-    height: 0px;
-    border: 1.5px dashed rgba(99,179,237,0.8);
-    pointer-events: none;
-    box-sizing: border-box;
-  `;
-  nodeEl.parentElement?.appendChild(selEl);
-
-  let elapsed = 0;
-  while (elapsed < dragDuration) {
-    const dt: number = yield;
-    elapsed += dt;
-    const t = easeOutCubic(Math.min(elapsed / dragDuration, 1));
-
-    // Grow the selection rectangle
-    selEl.style.width = `${lerp(0, rect.width, t)}px`;
-    selEl.style.height = `${lerp(0, rect.height, t)}px`;
-
-    // Move cursor from top-left to bottom-right
-    const cursorX = lerp(rect.left, rect.right, t);
-    const cursorY = lerp(rect.top, rect.bottom, t);
-    onMove(cursorX, cursorY, "crosshair");
-  }
-
-  onClick(rect.right, rect.bottom); // drag-end click burst
-
-  // Make the main node visible now
-  nodeEl.style.opacity = "1";
-
-  // --- Phase 2: Fill ---
-  elapsed = 0;
-  while (elapsed < fillDuration) {
-    const dt: number = yield;
-    elapsed += dt;
-    const t = easeOutCubic(Math.min(elapsed / fillDuration, 1));
-    nodeEl.style.backgroundColor = paint.backgroundColor;
-    nodeEl.style.opacity = lerp(0, 1, t).toString();
-    if (paint.backgroundImage && paint.backgroundImage !== "none") {
-      nodeEl.style.backgroundImage = paint.backgroundImage;
-    }
-  }
-
-  // Remove selection outline
-  selEl.remove();
-
-  // --- Phase 3: Border ---
-  if (paint.borderTopWidth && paint.borderTopWidth !== "0px") {
-    elapsed = 0;
-    // Apply border style immediately but animate opacity
-    nodeEl.style.borderStyle = "solid";
-    nodeEl.style.borderTopWidth = paint.borderTopWidth;
-    nodeEl.style.borderRightWidth = paint.borderRightWidth;
-    nodeEl.style.borderBottomWidth = paint.borderBottomWidth;
-    nodeEl.style.borderLeftWidth = paint.borderLeftWidth;
-    nodeEl.style.borderTopColor = paint.borderTopColor;
-    nodeEl.style.borderRightColor = paint.borderRightColor;
-    nodeEl.style.borderBottomColor = paint.borderBottomColor;
-    nodeEl.style.borderLeftColor = paint.borderLeftColor;
-    nodeEl.style.borderRadius = paint.borderTopLeftRadius;
-
-    while (elapsed < borderDuration) {
-      const dt: number = yield;
-      elapsed += dt;
-    }
-  }
-
-  // --- Phase 4: Shadow ---
-  if (paint.boxShadow && paint.boxShadow !== "none") {
-    elapsed = 0;
-    while (elapsed < shadowDuration) {
-      const dt: number = yield;
-      elapsed += dt;
-      const t = easeOutCubic(Math.min(elapsed / shadowDuration, 1));
-      // Interpolate box-shadow opacity by injecting alpha on the shadow
-      nodeEl.style.boxShadow = t >= 1 ? paint.boxShadow : "none";
-    }
-    nodeEl.style.boxShadow = paint.boxShadow;
-  }
+export interface RoutineCtx {
+  item: SwarmItem;
+  /** The routine's agent slot. */
+  agentIdx: number;
+  view: View;
+  swarm: AgentSwarm;
+  sound: SoundEngine;
+  /** Guide x this text item must snap onto, or null (world coords). */
+  guideX: number | null;
+  /** Deterministic jitter source (seeded per run). */
+  rand: () => number;
+  /** Move the routine's cursor. */
+  moveTo(x: number, y: number, type?: "arrow" | "crosshair" | "ibeam" | "ew-resize" | "dup"): void;
+  /** Click burst at world coords (converted by the engine). */
+  click(x: number, y: number): void;
+  /** Throttled typing clack. */
+  typeClack(): void;
+  /** Light up the alignment guide under a text item (snap beat). */
+  snapGuide(x: number): void;
 }
 
-// ─── Text routine ─────────────────────────────────────────────────────────────
+export type RoutineGen = Generator<number, void, number>;
 
-/**
- * Text typing animation.
- *
- * The cursor "positions" at the text node; then characters type in with
- * per-character opacity + tiny y-offset. Multi-line blocks type line-by-line
- * when > 120 chars. Caret blinks during typing.
- */
-function* textRoutine(
-  record: ElementRecord,
-  nodeEl: HTMLElement | null,
-  _agentIdx: number,
-  onMove: (x: number, y: number, type: string) => void,
-  onClick: (x: number, y: number) => void
-): Generator<void, void, number> {
-  if (!nodeEl || !record.text) return;
+// ─── Rect / container ─────────────────────────────────────────────────────────
 
-  const { rect, text } = record;
-  const content = text.textContent;
-  if (!content) return;
+function* drawRectRoutine(ctx: RoutineCtx): RoutineGen {
+  const { item, view } = ctx;
+  view.makeDrawOutline(item);
 
-  // Position cursor at start of text block
-  onMove(rect.left + 2, rect.top + rect.height / 2, "ibeam");
-  onClick(rect.left + 2, rect.top + rect.height / 2);
+  const x = item.x;
+  const y = item.y;
+  const w = Math.max(item.w, 4);
+  const h = Math.max(item.h, 4);
 
-  // Apply font styles to node
-  nodeEl.style.font = text.font;
-  nodeEl.style.color = text.color;
-  nodeEl.style.lineHeight = text.lineHeight;
-  nodeEl.style.letterSpacing = text.letterSpacing;
-  nodeEl.style.textAlign = text.textAlign;
-  nodeEl.style.opacity = "1";
+  // Cursor drags from top-left to bottom-right while the dashed frame grows.
+  ctx.moveTo(x + 4, y + 4, "crosshair");
+  yield* wait(0.1);
+  ctx.click(x + 4, y + 4);
 
-  const isLong = content.length > 120;
-
-  if (isLong) {
-    // Line-by-line: split by words and type in chunks
-    const words = content.split(" ");
-    const charsPerChunk = 40;
-    let typed = "";
-
-    for (let i = 0; i < words.length; i += 5) {
-      const chunk = words.slice(i, i + 5).join(" ");
-      typed += (typed ? " " : "") + chunk;
-      nodeEl.textContent = typed + "▍"; // caret
-
-      // Duration proportional to chunk length
-      const chunkDuration = (chunk.length / charsPerChunk) * 0.08;
-      yield* waitSeconds(chunkDuration);
-
-      // Update cursor position proportionally
-      const progress = (i + 5) / words.length;
-      onMove(
-        lerp(rect.left, rect.right - 10, progress),
-        rect.top + rect.height / 2,
-        "ibeam"
-      );
+  const dur = Math.min(0.34 + Math.sqrt(w * h) * 0.00075, 0.95);
+  let t = 0;
+  while (t < 1) {
+    const dt: number = yield 0;
+    t = clamp01(t + dt / dur);
+    const e = easeOutCubic(t);
+    if (item.node) {
+      item.node.style.width = `${Math.max(6, w * e)}px`;
+      item.node.style.height = `${Math.max(6, h * e)}px`;
     }
+    ctx.moveTo(x + w * e, y + h * e, "crosshair");
+  }
+  ctx.click(x + w, y + h);
+
+  yield* wait(0.07);
+
+  // Release: paint + fade in.
+  view.clearDrawOutline(item);
+  view.applyStyle(item);
+  const fadeT = 0.2;
+  let ft = 0;
+  while (ft < 1) {
+    const dt: number = yield 0;
+    ft = clamp01(ft + dt / fadeT);
+    if (item.node) item.node.style.opacity = String((item.op ?? 1) * easeOutCubic(ft));
+  }
+  if (item.node) item.node.style.opacity = String(item.op ?? 1);
+}
+
+// ─── Text ─────────────────────────────────────────────────────────────────────
+
+function* textRoutine(ctx: RoutineCtx): RoutineGen {
+  const { item, view } = ctx;
+  if (!item.typed || !item.node) return;
+
+  // Placement offset for the guide-snap beat.
+  const snapTarget = ctx.guideX;
+  const offX = snapTarget != null
+    ? (ctx.rand() < 0.5 ? -1 : 1) * (18 + ctx.rand() * 34)
+    : 0;
+  item.node.style.transform = `translate3d(${offX}px, 0, 0)`;
+  item.node.style.left = `${item.x}px`;
+
+  // Move to the text start with an ibeam cursor.
+  const ix = item.x + offX + 2;
+  const iy = item.y + Math.min(item.h, 22) / 2;
+  ctx.moveTo(ix, iy, "ibeam");
+  yield* wait(0.08);
+  ctx.click(ix, iy);
+
+  // Fade in the empty box.
+  let ft = 0;
+  while (ft < 1) {
+    const dt: number = yield 0;
+    ft = clamp01(ft + dt / 0.14);
+    if (item.node) item.node.style.opacity = String(easeOutCubic(ft) * (item.op ?? 1));
+  }
+
+  // Type characters. Big headings type slower (they matter more).
+  const total = item.typed.seq.length;
+  const cps = item.big ? 22 : 46;
+  let shown = 0;
+  let lastClackAt = 0;
+  let t = 0;
+  while (shown < total) {
+    const dt: number = yield 0;
+    t += dt;
+    // Round to integer chars (avoids subchar writes).
+    shown = Math.min(total, Math.floor(t * cps));
+    view.revealText(item, shown);
+    if (t - lastClackAt > 0.055) {
+      lastClackAt = t;
+      ctx.typeClack();
+    }
+    // Caret tracks the text edge.
+    const edge = Math.min(item.w - 2, (shown / total) * item.w);
+    ctx.moveTo(item.x + offX + edge, item.y + item.h / 2, "ibeam");
+  }
+  yield* wait(0.05);
+  view.revealText(item, total);
+  view.removeCaret(item);
+
+  // Guide snap: drag the finished text onto the alignment guide.
+  if (snapTarget != null && offX !== 0) {
+    ctx.moveTo(item.x, item.y + item.h / 2, "ew-resize");
+    yield* wait(0.06);
+    ctx.click(item.x, item.y + item.h / 2);
+    // Show the red guide while we settle.
+    if (snapTarget != null) ctx.snapGuide(snapTarget);
+    const settleDur = 0.3;
+    let st = 0;
+    while (st < 1) {
+      const dt: number = yield 0;
+      st = clamp01(st + dt / settleDur);
+      const e = easeOutCubic(st);
+      const cx = item.x + offX + (item.w / 2 - offX) * e;
+      ctx.moveTo(cx, item.y + item.h / 2, "ew-resize");
+      item.node!.style.transform = `translate3d(${offX * (1 - e)}px, 0, 0)`;
+    }
+    ctx.click(item.x, item.y + item.h / 2);
+    item.node!.style.transform = "";
+    if (snapTarget != null) ctx.snapGuide(snapTarget);
   } else {
-    // Per-character animation for short text
-    const perCharDuration = Math.max(0.02, Math.min(0.06, 350 / content.length / 1000));
-    let typed = "";
+    // No guide: just clear the transform.
+    item.node.style.transform = "";
+  }
+}
 
-    for (let i = 0; i < content.length; i++) {
-      typed += content[i];
-      nodeEl.textContent = typed + "▍";
+// ─── Image ────────────────────────────────────────────────────────────────────
 
-      // Move cursor with text
-      const progress = (i + 1) / content.length;
-      onMove(
-        lerp(rect.left, rect.right, Math.min(progress, 1)),
-        rect.top + rect.height / 2,
-        "ibeam"
-      );
+function* imageRoutine(ctx: RoutineCtx): RoutineGen {
+  const { item, view } = ctx;
+  const inner = item.node?.firstElementChild as HTMLElement | null;
+  if (!item.node) return;
 
-      yield* waitSeconds(perCharDuration);
+  const cx0 = item.x;
+  const cy0 = item.y;
+  ctx.moveTo(cx0 + 18, cy0 + 18, "crosshair");
+  yield* wait(0.12);
+  ctx.click(cx0 + 18, cy0 + 18);
+
+  // Clip sweep on the inner content (top → bottom).
+  view.makeDrawOutline(item);
+  let ft = 0;
+  const fadeT = 0.16;
+  while (ft < 1) {
+    const dt: number = yield 0;
+    ft = clamp01(ft + dt / fadeT);
+    if (item.node) item.node.style.opacity = String(easeOutCubic(ft) * (item.op ?? 1));
+  }
+  view.clearDrawOutline(item);
+
+  if (inner) {
+    inner.style.clipPath = "inset(100% 0 0 0)";
+    const sweepDur = Math.min(0.24 + item.h * 0.0006, 0.55);
+    let st = 0;
+    while (st < 1) {
+      const dt: number = yield 0;
+      st = clamp01(st + dt / sweepDur);
+      const e = easeOutCubic(st);
+      inner.style.clipPath = `inset(${Math.round((1 - e) * 100)}% 0 0 0)`;
+      // Cursor rides the reveal edge
+      ctx.moveTo(item.x + item.w * 0.7, item.y + item.h * e, "crosshair");
+    }
+    inner.style.clipPath = "";
+  }
+  yield* wait(0.08);
+}
+
+// ─── Line ─────────────────────────────────────────────────────────────────────
+
+function* lineRoutine(ctx: RoutineCtx): RoutineGen {
+  ctx.moveTo(ctx.item.x + 2, ctx.item.y, "arrow");
+  yield* wait(0.12);
+  ctx.click(ctx.item.x + 2, ctx.item.y);
+
+  let t = 0;
+  const dur = 0.2;
+  while (t < 1) {
+    const dt: number = yield 0;
+    t = clamp01(t + dt / dur);
+    const e = easeOutCubic(t);
+    if (ctx.item.node) {
+      const child = ctx.item.node.firstElementChild as HTMLElement | null;
+      if (child) child.style.width = `${e * 100}%`;
+      ctx.moveTo(ctx.item.x + ctx.item.w * e, ctx.item.y);
     }
   }
-
-  // Final: remove caret, set full text
-  nodeEl.textContent = content;
+  ctx.click(ctx.item.x + ctx.item.w, ctx.item.y);
+  yield* wait(0.05);
 }
 
-// ─── Image routine ────────────────────────────────────────────────────────────
+// ─── Duplicate drag ───────────────────────────────────────────────────────────
 
-/**
- * Image reveal animation.
- *
- * Phase 1: cursor drops a dashed frame (image loading state)
- * Phase 2: clip-path inset() sweeps from top to bottom (reveal)
- * Phase 3: shadow + border-radius finalize
- */
-function* imageRoutine(
-  record: ElementRecord,
-  nodeEl: HTMLElement | null,
-  _agentIdx: number,
-  onMove: (x: number, y: number, type: string) => void,
-  onClick: (x: number, y: number) => void
-): Generator<void, void, number> {
-  if (!nodeEl || !record.image) return;
+function* dupRoutine(ctx: RoutineCtx): RoutineGen {
+  const { item, view } = ctx;
+  const master = item.dupOf;
+  if (!master || !item.node) return;
 
-  const { rect, paint } = record;
-  const imgEl = nodeEl as HTMLImageElement;
+  const dx = item.x - master.x;
+  const dy = item.y - master.y;
 
-  // Move cursor to center of image
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-  onMove(cx, cy, "crosshair");
-  onClick(cx, cy);
+  // Start as a copy sitting on top of the master.
+  item.node.style.left = `${master.x}px`;
+  item.node.style.top = `${master.y}px`;
 
-  // Show with clip fully hiding the image
-  imgEl.style.opacity = "1";
-  imgEl.style.clipPath = "inset(100% 0 0 0)";
+  const mx = master.x + master.w * 0.5;
+  const my = master.y + master.h * 0.5;
+  ctx.moveTo(mx, my, "dup");
+  yield* wait(0.1);
+  ctx.click(mx, my);
 
-  // Wait for image to load (it's already decoding async)
-  yield* waitSeconds(0.15);
-
-  // Phase 2: clip-path sweep (200–400ms based on image height)
-  const sweepDuration = Math.min(0.2 + rect.height * 0.0005, 0.6);
-  let elapsed = 0;
-
-  while (elapsed < sweepDuration) {
-    const dt: number = yield;
-    elapsed += dt;
-    const t = easeOutQuart(Math.min(elapsed / sweepDuration, 1));
-    const inset = Math.round((1 - t) * 100);
-    imgEl.style.clipPath = `inset(${inset}% 0 0 0)`;
+  // Fade the copy in over the master, then drag it into place.
+  let ft = 0;
+  while (ft < 1) {
+    const dt: number = yield 0;
+    ft = clamp01(ft + dt / 0.14);
+    item.node.style.opacity = String(easeOutCubic(ft) * 0.95);
   }
 
-  imgEl.style.clipPath = "none";
-
-  // Phase 3: finalize radius + shadow
-  if (paint.borderTopLeftRadius && paint.borderTopLeftRadius !== "0px") {
-    imgEl.style.borderRadius = paint.borderTopLeftRadius;
+  const dragDur = Math.min(0.4 + Math.hypot(dx, dy) * 0.0013, 0.8);
+  let t = 0;
+  while (t < 1) {
+    const dt: number = yield 0;
+    t = clamp01(t + dt / dragDur);
+    const e = easeOutCubic(t);
+    // Non-linear path: slight arc instead of a straight lerp.
+    const bow = Math.sin(Math.PI * t) * Math.min(30, Math.hypot(dx, dy) * 0.08);
+    const nx = master.x + dx * e - (dy / (Math.hypot(dx, dy) || 1)) * bow;
+    const ny = master.y + dy * e + (dx / (Math.hypot(dx, dy) || 1)) * bow;
+    item.node.style.left = `${nx}px`;
+    item.node.style.top = `${ny}px`;
+    ctx.moveTo(nx + master.w * 0.5, ny + master.h * 0.5, "dup");
   }
-  if (paint.boxShadow && paint.boxShadow !== "none") {
-    imgEl.style.boxShadow = paint.boxShadow;
-  }
 
-  yield* waitSeconds(0.1);
+  // Land: snap to the exact target and settle.
+  item.node.style.left = `${item.x}px`;
+  item.node.style.top = `${item.y}px`;
+  ctx.click(item.x + item.w * 0.5, item.y + item.h * 0.5);
+
+  // Copies show their full content as they settle.
+  if (item.typed) {
+    view.revealText(item, item.typed.seq.length);
+    view.removeCaret(item);
+  } else if (item.kind === "rect") {
+    view.applyStyle(item);
+  }
+  item.node.classList.add("node-settle");
+  let lt = 0;
+  while (lt < 1) {
+    const dt: number = yield 0;
+    lt = clamp01(lt + dt / 0.2);
+    item.node!.style.opacity = String((item.op ?? 1) * (0.95 + 0.05 * easeOutCubic(lt)));
+  }
+  item.node.classList.remove("node-settle");
+  item.node.style.opacity = String(item.op ?? 1);
 }
 
-// ─── SVG / icon routine ───────────────────────────────────────────────────────
+// ─── Registry ─────────────────────────────────────────────────────────────────
 
-/**
- * SVG reveal animation.
- *
- * opacity + scale(0.94 → 1) for all SVGs.
- * For stroke-based SVGs ≤ 2kB of path data: stroke-dash draw approximation.
- */
-function* svgRoutine(
-  record: ElementRecord,
-  nodeEl: HTMLElement | null,
-  _agentIdx: number,
-  onMove: (x: number, y: number, type: string) => void
-): Generator<void, void, number> {
-  if (!nodeEl || !record.svg) return;
+export type TaskType = "rect" | "text" | "image" | "line" | "dup";
 
-  const { rect } = record;
-  const cx = rect.left + rect.width / 2;
-  const cy = rect.top + rect.height / 2;
-  onMove(cx, cy, "arrow");
-
-  const svgDuration = 0.25;
-  let elapsed = 0;
-
-  // Start at scale 0.94, opacity 0
-  nodeEl.style.opacity = "0";
-  nodeEl.style.transform = "scale(0.94)";
-  nodeEl.style.transformOrigin = "center";
-
-  while (elapsed < svgDuration) {
-    const dt: number = yield;
-    elapsed += dt;
-    const t = easeOutCubic(Math.min(elapsed / svgDuration, 1));
-    nodeEl.style.opacity = t.toString();
-    const scale = lerp(0.94, 1.0, t);
-    nodeEl.style.transform = `scale(${scale})`;
+export function routineFor(type: TaskType): (ctx: RoutineCtx) => RoutineGen {
+  switch (type) {
+    case "rect": return drawRectRoutine;
+    case "text": return textRoutine;
+    case "image": return imageRoutine;
+    case "line": return lineRoutine;
+    case "dup": return dupRoutine;
   }
-
-  nodeEl.style.opacity = "1";
-  nodeEl.style.transform = "scale(1)";
-}
-
-// ─── Registration ─────────────────────────────────────────────────────────────
-
-/**
- * Call this once during SwarmIntro initialization to register all routines
- * with the scheduler's registry.
- */
-export function initRoutines(): void {
-  registerRoutine("rect", rectRoutine as RoutineFn);
-  registerRoutine("text", textRoutine as RoutineFn);
-  registerRoutine("image", imageRoutine as RoutineFn);
-  registerRoutine("svg", svgRoutine as RoutineFn);
 }

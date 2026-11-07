@@ -1,24 +1,19 @@
 /**
  * SwarmIntro.tsx — Swarm Rebuild intro orchestrator.
  *
- * The single entry-point React component. Renders null on the server.
- * On the client, manages the full intro lifecycle:
+ * Runs the full choreography imperatively (this component renders null):
  *
- *   1. Eligibility check (policy.ts)
- *   2. Wait for readiness (FCP + fonts + hero settle)
- *   3. Snapshot the DOM (capture/snapshot.ts)
- *   4. Mount overlay (build/overlay.tsx)
- *   5. Build plan (build/scheduler.ts)
- *   6. Run agents + cursor canvas (agents/)
- *   7. Play routines (build/routines.ts)
- *   8. Finale → finalReveal
- *   9. Integrity check (diagnostics/integrity.ts)
- *  10. Cleanup
+ *   1. Policy check (state/policy.ts) — skip rules, profile, seed
+ *   2. Hide the page (visibility:hidden — zero CLS, no flash)
+ *   3. Capture: hidden sweep + world-coords item snapshot
+ *   4. Mount the stage + cursor swarm + controls
+ *   5. Engine drives everything until the build completes
+ *   6. Finale → cross-fade finalReveal → cleanup
  *
- * Fail-safe contract (§4.7):
- *   - Any throw before body is hidden → intro never engages (log + no-op)
- *   - Any throw after body hidden → revealNow() immediately (≤ 100 ms)
- *   - revealNow() is idempotent (safe to call from any handler, any number of times)
+ * Fail-safe contract (§4.7): any throw before capture → intro never
+ * engages; any throw after the body is hidden → revealNow() immediately
+ * (idempotent, ≤100 ms). StrictMode-safe: effect re-runs re-check the
+ * session flag.
  */
 
 "use client";
@@ -26,45 +21,66 @@
 import { useEffect } from "react";
 import { resolvePolicy, PROFILE_CONFIG } from "./state/policy";
 import { hasPlayed, markPlayed, resetPlayed, isSoundEnabled } from "./state/session";
-import { waitForReadiness, snapshotDOM } from "./capture/snapshot";
-import { mountOverlay, unmountOverlay, watchResize } from "./build/overlay";
-import { Scheduler } from "./build/scheduler";
-import { initRoutines } from "./build/routines";
-import { revealNow, finalReveal, onRevealComplete } from "./build/reveals";
-import { CursorManager } from "./agents/cursors";
-import { PointerLayer, CursorType } from "./agents/pointerLayer";
+import { captureItems } from "./capture/snapshot";
+import {
+  hideBody,
+  revealNow,
+  finalReveal,
+  onRevealComplete,
+  registerOverlayHost,
+  watchResizeAbort,
+} from "./build/reveals";
+import { View } from "./build/overlay";
+import { Engine } from "./build/scheduler";
+import { AgentSwarm } from "./agents/agents";
 import { SoundEngine } from "./fx/sound";
 import { mountControls, setControlsPhase, unmountControls } from "./fx/controls";
-import { runIntegrityChecks } from "./diagnostics/integrity";
 
-// ─── Main component ───────────────────────────────────────────────────────────
+// Agent accent colors for the HUD dots (matches agents.ts palette order)
+const AGENT_COLORS = ["#38bdf8", "#818cf8", "#34d399", "#fb923c", "#f472b6", "#a78bfa"];
+
+const nextFrame = () => new Promise<number>((r) => requestAnimationFrame(r));
+
+/** Lightweight stage telemetry for live diagnostics (all builds, tiny). */
+function stage(name: string): void {
+  try {
+    (window as unknown as Record<string, unknown>).__swarmStage = name;
+  } catch {
+    /* ignore */
+  }
+}
 
 export function SwarmIntro() {
   useEffect(() => {
-    // Server-side safety (belt-and-suspenders; 'use client' already guards this)
     if (typeof window === "undefined") return;
 
-    let cleanedUp = false;
-    let schedulerRef: Scheduler | null = null;
-    let pointerLayerRef: PointerLayer | null = null;
-    const soundEngine = new SoundEngine();
-    const cleanupCallbacks: Array<() => void> = [];
+    let disposed = false;
+    let engine: Engine | null = null;
+    const sound = new SoundEngine();
+    const disposers: Array<() => void> = [];
 
-    // ── Cleanup handler (idempotent) ──────────────────────────────────────
-    function cleanup() {
-      if (cleanedUp) return;
-      cleanedUp = true;
-      schedulerRef?.abort();
-      pointerLayerRef?.dispose();
-      unmountControls();
-      unmountOverlay();
-      soundEngine.disable();
-      for (const cb of cleanupCallbacks) {
-        try { cb(); } catch { /* ignore */ }
+    function runDisposers() {
+      for (const d of disposers) {
+        try {
+          d();
+        } catch {
+          /* ignore */
+        }
       }
+      disposers.length = 0;
     }
 
-    // ── Global keyboard handler ───────────────────────────────────────────
+    function cleanup() {
+      if (disposed) return;
+      disposed = true;
+      engine?.abort();
+      engine = null;
+      runDisposers();
+      unmountControls();
+      sound.disable();
+    }
+
+    // ── Global listeners ────────────────────────────────────────────────
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
         revealNow();
@@ -72,22 +88,15 @@ export function SwarmIntro() {
       }
     }
     document.addEventListener("keydown", onKeyDown);
-    cleanupCallbacks.push(() => document.removeEventListener("keydown", onKeyDown));
+    disposers.push(() => document.removeEventListener("keydown", onKeyDown));
 
-    // ── Tab visibility handler ────────────────────────────────────────────
-    function onVisibilityChange() {
-      if (document.visibilityState === "hidden") {
-        schedulerRef?.pause();
-      } else {
-        schedulerRef?.resume();
-      }
+    function onVisibility() {
+      if (document.visibilityState === "hidden") engine?.pause();
+      else engine?.resume();
     }
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    cleanupCallbacks.push(() =>
-      document.removeEventListener("visibilitychange", onVisibilityChange)
-    );
+    document.addEventListener("visibilitychange", onVisibility);
+    disposers.push(() => document.removeEventListener("visibilitychange", onVisibility));
 
-    // ── Back-forward cache: skip on restored sessions ─────────────────────
     function onPageShow(e: PageTransitionEvent) {
       if (e.persisted) {
         revealNow();
@@ -95,199 +104,150 @@ export function SwarmIntro() {
       }
     }
     window.addEventListener("pageshow", onPageShow);
-    cleanupCallbacks.push(() => window.removeEventListener("pageshow", onPageShow));
+    disposers.push(() => window.removeEventListener("pageshow", onPageShow));
 
-    // ── Main async run ────────────────────────────────────────────────────
+    onRevealComplete(cleanup);
+
+    // ── Main async run ──────────────────────────────────────────────────
     async function run() {
       try {
-        // 1. Policy check
-        const played = hasPlayed();
-        const policy = resolvePolicy(played);
-
+        const policy = resolvePolicy(hasPlayed());
         if (policy.profile === "skip") {
           if (process.env.NODE_ENV === "development") {
             console.log(`[SwarmIntro] Skipped: ${policy.skipReason}`);
           }
           return;
         }
-
-        // Reset played flag if replay requested
-        if (policy.isReplay) {
-          resetPlayed();
-        }
-
-        const profileConfig = PROFILE_CONFIG[policy.profile];
-
-        if (process.env.NODE_ENV === "development") {
-          console.log(`[SwarmIntro] Starting — profile: ${policy.profile}, seed: ${policy.seed}`);
-        }
-
-        // 2. Wait for readiness (FCP + fonts + hero settle)
-        await waitForReadiness();
-
-        // After readiness, any error must call revealNow()
-        // Mark played now so crashes don't re-trigger on reload
+        if (policy.isReplay) resetPlayed();
         markPlayed();
+        stage("policy-play");
 
-        // 3. Snapshot the DOM
-        let snapshot;
-        try {
-          snapshot = await snapshotDOM();
-        } catch (err) {
-          console.error("[SwarmIntro] Snapshot failed:", err);
-          revealNow();
-          cleanup();
-          return;
+        const config = PROFILE_CONFIG[policy.profile];
+
+        // 1. Hide the page BEFORE capturing so the sweep/capture is invisible.
+        hideBody();
+        stage("hidden");
+
+        // 2. Capture (includes the hidden scroll sweep).
+        stage("capturing");
+        const capture = await captureItems();
+        if (disposed) return;
+        stage("captured");
+        if (process.env.NODE_ENV === "development") {
+          console.log(
+            `[SwarmIntro] capture: ${capture.items.length} items, ${capture.groups.length} groups, doc ${capture.docW}x${capture.docH}`
+          );
         }
 
-        // 4. Mount overlay + init routines
-        initRoutines();
+        // 3. Stage + swarm + controls.
+        const view = new View();
+        view.mount(capture.bgColor, capture.docW, capture.docH);
+        registerOverlayHost(view.host);
+        const swarm = new AgentSwarm(view.canvas, config.agentCount, policy.seed);
+        view.hudSetAgentColors(AGENT_COLORS.slice(0, config.agentCount));
 
-        let cursorCanvas: HTMLCanvasElement;
-        let nodeRefMap: Map<number, HTMLElement>;
-        try {
-          const result = mountOverlay(snapshot.records);
-          cursorCanvas = result.cursorCanvas;
-          nodeRefMap = result.nodeRefMap;
-        } catch (err) {
-          console.error("[SwarmIntro] Overlay mount failed:", err);
-          revealNow();
-          cleanup();
-          return;
-        }
-
-        // Setup resize abort
-        const cancelResizeWatch = watchResize(() => {
-          revealNow();
-          cleanup();
-        });
-        cleanupCallbacks.push(cancelResizeWatch);
-
-        // 5. Init cursor agents + pointer layer
-        const pointerLayer = new PointerLayer(cursorCanvas, profileConfig.agentCount);
-        pointerLayerRef = pointerLayer;
-
-        const cursorManager = new CursorManager(
-          profileConfig.agentCount,
-          pointerLayer,
-          policy.seed
-        );
-        cursorManager.init();
-        pointerLayer.start();
-
-        // 6. Mount controls
-        const controlsConfig = {
-          onSkip: () => { revealNow(); cleanup(); },
-          onReplay: () => {
+        engine = new Engine(view, swarm, sound, capture, config, policy.seed, {
+          onComplete: () => {
+            void handleComplete();
+          },
+          onFail: (err) => {
+            console.error("[SwarmIntro] engine error:", err);
             revealNow();
             cleanup();
-            // Navigate to replay
+          },
+        });
+
+        engine.buildPlan();
+        engine.start();
+        stage("engine-started");
+
+        // 4. Controls.
+        mountControls({
+          onSkip: () => {
+            revealNow();
+            cleanup();
+          },
+          onReplay: () => {
+            cleanup();
             const url = new URL(window.location.href);
             url.searchParams.set("replay", "1");
-            window.location.href = url.toString();
+            window.location.assign(url.toString());
           },
-          onSoundToggle: (enabled: boolean) => {
-            if (enabled) {
-              soundEngine.enable();
-            } else {
-              soundEngine.disable();
-            }
+          onSoundToggle: (enabled) => {
+            if (enabled) sound.enable();
+            else sound.disable();
           },
-          phase: "intro" as const,
-        };
-        mountControls(controlsConfig);
-
-        // If sound was pre-enabled, don't auto-enable (needs gesture)
-        // But listen for first pointer event if ?sound=1
-        if (policy.soundPreload || isSoundEnabled()) {
-          const enableOnPointer = () => {
-            soundEngine.enable();
-            document.removeEventListener("pointerdown", enableOnPointer);
-          };
-          document.addEventListener("pointerdown", enableOnPointer, { once: true });
-        }
-
-        // 7. Build plan + start scheduler
-        const scheduler = new Scheduler({
-          profile: profileConfig,
-          seed: policy.seed,
-          nodeRefMap,
-          onAgentMove: (agentIdx, x, y, cursorType) => {
-            cursorManager.moveAgent(agentIdx, x, y, cursorType as CursorType);
-          },
-          onAgentClick: (agentIdx, x, y) => {
-            cursorManager.clickAgent(agentIdx, x, y);
-            soundEngine.playGrab();
-          },
-          onComplete: async () => {
-            // Finale: agents converge and fly away
-            cursorManager.startFinale();
-            soundEngine.playCompletion();
-
-            // Switch controls to post-intro mode (replay button)
-            setControlsPhase("post", controlsConfig);
-
-            // Wait for finale animation (cursors flying away)
-            await new Promise<void>((resolve) => {
-              const checkFinale = () => {
-                if (cursorManager.isFinaleComplete()) {
-                  resolve();
-                } else {
-                  requestAnimationFrame(checkFinale);
-                }
-              };
-              requestAnimationFrame(checkFinale);
-            });
-
-            // Final reveal
-            finalReveal();
-
-            // Run integrity checks (dev only)
-            runIntegrityChecks(snapshot);
-
-            // Hide controls after 5s
-            setTimeout(() => {
-              unmountControls();
-              cleanup();
-            }, 5_000);
-          },
-          onError: (err) => {
-            console.error("[SwarmIntro] Scheduler error:", err);
-            revealNow();
-            cleanup();
-          },
+          phase: "intro",
         });
 
-        schedulerRef = scheduler;
+        // Sound requires a user gesture; arm it for the first interaction.
+        if (isSoundEnabled() || policy.soundPreload) {
+          const arm = () => {
+            sound.enable();
+            document.removeEventListener("pointerdown", arm);
+          };
+          document.addEventListener("pointerdown", arm, { once: true });
+          disposers.push(() => document.removeEventListener("pointerdown", arm));
+        }
 
-        // Wait for React nodes to mount (next frame)
-        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+        // 5. Viewport drift → abort (geometry snapshot becomes invalid).
+        disposers.push(
+          watchResizeAbort(() => {
+            revealNow();
+            cleanup();
+          })
+        );
 
-        scheduler.buildPlan(snapshot.records);
-        scheduler.start();
+        // ── Completion: finale → cross-fade reveal ─────────────────────────
+        async function handleComplete() {
+          try {
+            sound.playCompletion();
+            setControlsPhase("post", {
+              onSkip: () => {
+                revealNow();
+                cleanup();
+              },
+              onReplay: () => {
+                cleanup();
+                const url = new URL(window.location.href);
+                url.searchParams.set("replay", "1");
+                window.location.assign(url.toString());
+              },
+              onSoundToggle: () => {},
+              phase: "post",
+            });
 
+            // Let the finale play out (agents converge → launch).
+            let guard = 0;
+            while (engine && !engine.isFinaleDone() && guard < 400) {
+              await nextFrame();
+              guard++;
+            }
+
+            stage("revealing");
+            finalReveal();
+            stage("revealed");
+          } catch (err) {
+            console.error("[SwarmIntro] completion error:", err);
+            revealNow();
+            cleanup();
+          }
+        }
       } catch (err) {
-        // Any unexpected error after mount → reveal immediately
-        console.error("[SwarmIntro] Unexpected error:", err);
+        console.error("[SwarmIntro] unexpected error:", err);
         revealNow();
         cleanup();
       }
     }
 
-    // Register cleanup with the reveal system
-    onRevealComplete(cleanup);
+    void run();
 
-    // Start the run
-    run();
-
-    // React cleanup (component unmount)
     return () => {
       revealNow();
       cleanup();
     };
-  }, []); // Run once on mount
+  }, []);
 
-  // Renders nothing — the overlay is mounted imperatively on documentElement
   return null;
 }
 
