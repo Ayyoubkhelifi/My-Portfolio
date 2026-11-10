@@ -171,32 +171,33 @@ export function resolvePolicy(sessionPlayed: boolean): PolicyResult {
 // ─── Profile constants ────────────────────────────────────────────────────────
 
 export interface ProfileConfig {
-  agentCount: number;
-  /** Max individual element animations (overflow → group-reveal) */
-  elementBudget: number;
-  /** Target total duration in seconds */
-  durationTarget: number;
-  /** Max duration clamp in seconds */
+  /** Minimum agents kept active during the build. */
+  agentMin: number;
+  /** Agents spawn up to this count while demand is high. */
+  agentMax: number;
+  /** Global choreography speed multiplier (tempo cap × speed). */
+  speed: number;
+  /** Hard cap in seconds — beyond this the build force-finishes. */
   durationMax: number;
 }
 
 export const PROFILE_CONFIG: Record<Exclude<SwarmProfile, "skip">, ProfileConfig> = {
   desktop: {
-    agentCount: 4,
-    elementBudget: 350,
-    durationTarget: 12,
-    durationMax: 14,
+    agentMin: 8,
+    agentMax: 24,
+    speed: 1.5,
+    durationMax: 36,
   },
   mid: {
-    agentCount: 3,
-    elementBudget: 200,
-    durationTarget: 10,
-    durationMax: 12,
+    agentMin: 6,
+    agentMax: 16,
+    speed: 1.8,
+    durationMax: 32,
   },
   mobile: {
-    agentCount: 2,
-    elementBudget: 120,
-    durationTarget: 7,
-    durationMax: 8,
+    agentMin: 4,
+    agentMax: 10,
+    speed: 2.2,
+    durationMax: 18,
   },
 };

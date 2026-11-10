@@ -32,12 +32,8 @@ import {
 } from "./build/reveals";
 import { View } from "./build/overlay";
 import { Engine } from "./build/scheduler";
-import { AgentSwarm } from "./agents/agents";
 import { SoundEngine } from "./fx/sound";
 import { mountControls, setControlsPhase, unmountControls } from "./fx/controls";
-
-// Agent accent colors for the HUD dots (matches agents.ts palette order)
-const AGENT_COLORS = ["#38bdf8", "#818cf8", "#34d399", "#fb923c", "#f472b6", "#a78bfa"];
 
 const nextFrame = () => new Promise<number>((r) => requestAnimationFrame(r));
 
@@ -143,10 +139,8 @@ export function SwarmIntro() {
         const view = new View();
         view.mount(capture.bgColor, capture.docW, capture.docH);
         registerOverlayHost(view.host);
-        const swarm = new AgentSwarm(view.canvas, config.agentCount, policy.seed);
-        view.hudSetAgentColors(AGENT_COLORS.slice(0, config.agentCount));
 
-        engine = new Engine(view, swarm, sound, capture, config, policy.seed, {
+        engine = new Engine(view, sound, capture, config, policy.seed, {
           onComplete: () => {
             void handleComplete();
           },
@@ -160,6 +154,16 @@ export function SwarmIntro() {
         engine.buildPlan();
         engine.start();
         stage("engine-started");
+
+        // The engine's pre-start flock follows the user's pointer.
+        const onPointerMove = (e: PointerEvent) => engine?.setMouse(e.clientX, e.clientY);
+        const onPointerLeave = () => engine?.clearMouse();
+        window.addEventListener("pointermove", onPointerMove, { passive: true });
+        document.documentElement.addEventListener("pointerleave", onPointerLeave);
+        disposers.push(() => {
+          window.removeEventListener("pointermove", onPointerMove);
+          document.documentElement.removeEventListener("pointerleave", onPointerLeave);
+        });
 
         // 4. Controls.
         mountControls({

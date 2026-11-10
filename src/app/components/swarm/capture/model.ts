@@ -77,6 +77,40 @@ export interface SwarmItem {
   scale?: number;
   shown?: number;
   settleAt?: number;
+  /** Drag offset applied by a duplicate routine (world px). */
+  dx?: number;
+  dy?: number;
+  /** Text item is mid-edit (caret active, box outlined). */
+  editing?: boolean;
+  /** Text item has a full-content selection active (bounds show full box). */
+  selAll?: boolean;
+  /** Line items carry their pen path (built by the planner). */
+  pts?: Array<{ x: number; y: number }>;
+}
+
+// ─── Overlay specs (selection boxes, measures) ───────────────────────────────
+
+export interface Box {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface OvShape {
+  t: "box" | "measure";
+  /** For boxes: the rectangle. For measures: endpoint A. */
+  b: Box;
+  /** For measures: endpoint B. */
+  a?: Box;
+  color?: "blue" | "red";
+  handles?: boolean;
+  badge?: string;
+  rulerLines?: boolean;
+  /** Text baseline accent line drawn during selection. */
+  underline?: Box | null;
+  /** For measures: the gap label ("24"). */
+  label?: string;
 }
 
 /** A repeated component: master subtree + one or more copies. */
@@ -95,6 +129,17 @@ export interface Guide {
   pos: number; // world coordinate of the guide
   flash: number; // 0..1 animation state
   op: number;
+  /** Live drag head position while being placed (world coord). */
+  cur?: number;
+  /** Shown at all? (dragging or placed) */
+  vis?: boolean;
+  /** Currently under drag. */
+  dragging?: boolean;
+  /** builder task that placed this guide */
+  task?: unknown;
+  /** Text tasks that snap to this guide */
+  deps?: unknown[];
+  shownAt?: number;
 }
 
 export interface CaptureResult {

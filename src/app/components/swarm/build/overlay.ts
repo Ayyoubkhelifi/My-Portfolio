@@ -5,8 +5,10 @@
  *
  *   .surface   (opaque page background — hides the real page during builds)
  *     .world   (document-sized layer in WORLD coords, translated by scroll)
- *     .fx      (alignment guide lines, in world coords)
- *     canvas   (cursor swarm: trails, bursts, sprites)
+ *     .fx      (SVG: alignment guides, edit-line polylines, selection boxes)
+ *     .badges  (dimension chips, measure labels)
+ *     .rulers  (top + left rulers that drop in while guides are placed)
+ *     .cursors (pooled SVG cursor sprites)
  *     .hud     (agents · progress readout)
  *
  * Item nodes are created once on demand and mutated in place by the
@@ -15,7 +17,15 @@
  * opacity, width/height and textContent on absolutely-positioned nodes.
  */
 
-import type { Guide, SwarmItem } from "../capture/model";
+import type { Guide, OvShape, SwarmItem } from "../capture/model";
+import type { Cursor, CursorShape } from "../agents/agents";
+import { HOTSPOT, cursorSVG } from "../agents/agents";
+
+// ─── Colors ───────────────────────────────────────────────────────────────────
+
+const RED = "rgba(244, 63, 94, 1)";
+const OV_BLUE = "rgba(56,189,248,0.95)";
+const RULER = 20;
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
@@ -43,18 +53,37 @@ const OVERLAY_CSS = `
     will-change: transform;
     transform: translate3d(0, 0, 0);
   }
-  .fx {
+  .fx, .badges, .cursors {
     position: absolute;
-    top: 0;
-    left: 0;
+    inset: 0;
+    overflow: hidden;
+    pointer-events: none;
   }
-  .guide {
+  .fx svg, .rulers svg { display: block; }
+  .badge {
     position: absolute;
-    width: 1px;
-    background: rgba(244, 63, 94, 0.75);
-    box-shadow: 0 0 6px rgba(244, 63, 94, 0.5);
-    opacity: 0;
-    transition: opacity 0.18s ease;
+    transform: translate(-50%, 0);
+    padding: 1px 4px;
+    border-radius: 2px;
+    color: #fff;
+    font: 600 11px/16px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .ruler {
+    position: absolute;
+    left: 0;
+    background: #1b1f24;
+  }
+  .ruler-top { top: 0; height: 20px; width: 100%; will-change: transform; }
+  .ruler-left { top: 0; left: 0; width: 20px; height: 100%; will-change: transform; }
+  .ruler-corner {
+    position: absolute; left: 0; top: 0; width: 20px; height: 20px;
+    background: #1b1f24;
+  }
+  .ruler text {
+    font: 500 9px ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    fill: #9aa7b4;
   }
   .hud {
     position: fixed;
@@ -103,22 +132,28 @@ const OVERLAY_CSS = `
     margin-left: 1px;
   }
   @keyframes swarmblink { 0%, 49% { opacity: 1; } 50%, 100% { opacity: 0; } }
+  .cspr {
+    position: absolute;
+    left: 0;
+    top: 0;
+    will-change: transform;
+  }
+  .cspr svg { display: block; }
 `;
 
 // ─── View class ───────────────────────────────────────────────────────────────
-
-const DASH = "1.5px dashed rgba(56,189,248,0.85)";
 
 export class View {
   host!: HTMLDivElement;
   shadow!: ShadowRoot;
   surface!: HTMLDivElement;
   world!: HTMLDivElement;
-  fx!: HTMLDivElement;
-  canvas!: HTMLCanvasElement;
+  fx!: SVGSVGElement;
+  badges!: HTMLDivElement;
+  cursorsEl!: HTMLDivElement;
+  rulerHost!: HTMLDivElement;
   hudText!: HTMLSpanElement;
   hudBarFill!: HTMLElement;
-  hudDots!: HTMLSpanElement;
 
   private _mounted = false;
   static _shadow: ShadowRoot | null = null;
@@ -128,8 +163,10 @@ export class View {
     return View._shadow;
   }
 
-  mount(bgColor: string, docW: number, docH: number): void {    if (this._mounted) return;
-    this._mounted = true;    this.host = document.createElement("div");
+  mount(bgColor: string, docW: number, docH: number): void {
+    if (this._mounted) return;
+    this._mounted = true;
+    this.host = document.createElement("div");
     this.host.setAttribute("data-swarm-host", "");
     this.shadow = this.host.attachShadow({ mode: "open" });
 
@@ -148,15 +185,28 @@ export class View {
     this.world.style.height = `${docH}px`;
     this.surface.appendChild(this.world);
 
-    this.fx = document.createElement("div");
-    this.fx.className = "fx";
-    this.fx.style.width = `${docW}px`;
-    this.fx.style.height = `${docH}px`;
-    this.surface.appendChild(this.fx);
+    const fx = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    fx.classList.add("fx-svg");
+    fx.setAttribute("width", "100%");
+    fx.setAttribute("height", "100%");
+    this.fx = fx;
 
-    this.canvas = document.createElement("canvas");
-    this.canvas.style.cssText = "position:fixed;inset:0;pointer-events:none;";
-    this.surface.appendChild(this.canvas);
+    const fxWrap = document.createElement("div");
+    fxWrap.className = "fx";
+    fxWrap.appendChild(fx);
+    this.surface.appendChild(fxWrap);
+
+    this.badges = document.createElement("div");
+    this.badges.className = "badges";
+    this.surface.appendChild(this.badges);
+
+    this.rulerHost = document.createElement("div");
+    this.rulerHost.style.cssText = "position:absolute;inset:0;overflow:hidden;";
+    this.surface.appendChild(this.rulerHost);
+
+    this.cursorsEl = document.createElement("div");
+    this.cursorsEl.className = "cursors";
+    this.surface.appendChild(this.cursorsEl);
 
     // HUD
     const hud = document.createElement("div");
@@ -177,6 +227,8 @@ export class View {
     document.documentElement.appendChild(this.host);
     View._shadow = this.shadow;
   }
+
+  private hudDots!: HTMLSpanElement;
 
   unmount(): void {
     if (!this._mounted) return;
@@ -236,6 +288,7 @@ export class View {
       caret.className = "caret";
       node.appendChild(caret);
       item.caret = caret;
+      node.style.transformOrigin = "0 0";
     } else if (item.kind === "image") {
       node.style.overflow = "hidden";
       let inner: HTMLElement;
@@ -279,36 +332,43 @@ export class View {
 
   /** Dashed draw outline helper on the node itself. */
   makeDrawOutline(item: SwarmItem): void {
-    item.node?.style.removeProperty("outline");
-    if (item.node) item.node.style.setProperty("outline", DASH, "important");
-    if (item.node) item.node.style.setProperty("outline-offset", "0px");
+    if (item.node) {
+      item.node.classList.add("node-draw");
+    }
   }
 
   clearDrawOutline(item: SwarmItem): void {
-    item.node?.style.removeProperty("outline");
-    item.node?.style.removeProperty("outline-offset");
+    if (item.node) {
+      item.node.classList.remove("node-draw");
+    }
+  }
+
+  /** Re-position / resize a node from the item's runtime geometry. */
+  syncItem(item: SwarmItem): void {
+    const node = item.node;
+    if (!node) return;
+    const dx = item.dx ?? 0;
+    const dy = item.dy ?? 0;
+    const x = item.x + dx;
+    const y = item.y + dy;
+    const w = item.drawW != null ? item.drawW : item.w;
+    const h = item.drawH != null ? item.drawH : item.h;
+    node.style.left = `${Math.min(x, x + w)}px`;
+    node.style.top = `${Math.min(y, y + h)}px`;
+    node.style.width = `${Math.max(w, 1)}px`;
+    node.style.height = `${Math.max(h, 1)}px`;
+    const sc = item.scale;
+    node.style.transform = sc != null && sc !== 1 ? `scale(${sc})` : "";
+    if (item.shown != null && item.typed) revealUnits(item, item.shown);
   }
 
   // ── Typed text ────────────────────────────────────────────────────────────
 
   /** Reveals `shown` characters of a text item across its typed units. */
   revealText(item: SwarmItem, shown: number): void {
-    if (!item.typed || !item.node) return;
-    const total = item.typed.seq.length;
-    const s = Math.min(shown, total);
-    for (const u of item.typed.units) {
-      if (u.t && u.src !== undefined) {
-        const keep = Math.max(0, Math.min(u.src.length, s - u.at));
-        const next = u.src.slice(0, keep);
-        if (u.t.data !== next) u.t.data = next; // Porsche-fast dedupe
-      } else if (u.e) {
-        const on = s > u.at;
-        if (on !== (u.e.style.visibility === "visible")) {
-          u.e.style.visibility = on ? "visible" : "hidden";
-        }
-      }
-    }
-    item.shown = s;
+    if (!item.typed) return;
+    item.shown = Math.min(shown, item.typed.seq.length);
+    revealUnits(item, item.shown);
   }
 
   removeCaret(item: SwarmItem): void {
@@ -318,27 +378,170 @@ export class View {
     }
   }
 
-  // ── Guides ────────────────────────────────────────────────────────────────
+  /** Visible opacity for a node WITHOUT touching position/size. */
+  setOpacity(item: SwarmItem, alpha: number): void {
+    item.node?.style.setProperty("opacity", String(alpha));
+  }
 
-  /** Sets the visible guide set; alpha driven by the engine each frame. */
-  renderGuides(guides: Guide[]): void {
-    for (const g of guides) {
-      const alpha = Math.max(g.op, g.flash);
-      let el = (g as Guide & { _el?: HTMLElement })._el;
-      if (alpha < 0.02 && el) {
-        el.style.opacity = "0";
-        continue;
+  // ── Overlay SVG + badges ─────────────────────────────────────────────────
+
+  private _ovS = "";
+  private _ovB = "";
+  private _rulersOn = false;
+
+  /** Rulers openness 0..1 (1 = fully dropped-in). */
+  renderRulers(t: number, marks: { top?: string; left?: string }): void {
+    if (t <= 0.001) {
+      if (this._rulersOn) {
+        this.rulerHost.innerHTML = "";
+        this._rulersOn = false;
       }
+      return;
+    }
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const top = marks?.top ?? "";
+    const left = marks?.left ?? "";
+    this.rulerHost.innerHTML =
+      `<div class="ruler ruler-top" style="transform:translateY(${Math.round((t - 1) * RULER)}px)"><svg width="${W}" height="${RULER}">${top}</svg></div>` +
+      `<div class="ruler ruler-left" style="transform:translateX(${Math.round((t - 1) * RULER)}px)"><svg width="${RULER}" height="${H}">${left}</svg></div>` +
+      `<div class="ruler-corner" style="opacity:${t.toFixed(3)}"></div>`;
+    this._rulersOn = true;
+  }
+
+  /**
+   * Render the overlay layer (guides/selections) + badges.
+   * `sx/sy` is the scroll offset; `specs`/`guides`/`lines` come from the engine.
+   */
+  renderOverlay(
+    specs: OvShape[],
+    guides: Guide[],
+    lines: Array<{
+      pts: Array<{ x: number; y: number }>;
+      placed: number;
+      owner: { x: number; y: number } | null;
+    }>,
+    sx: number,
+    sy: number
+  ): void {
+    const W = window.innerWidth;
+    const H = window.innerHeight;
+    const X = (x: number): number => Math.round((x - sx) * 10) / 10;
+    const Y = (y: number): number => Math.round((y - sy) * 10) / 10;
+
+    let s = "";
+    // Guides (red alignment lines; flash = glow)
+    for (const g of guides) {
+      if (!g.vis || (g.op ?? 0) <= 0) continue;
+      const sw = round1(1 + g.flash);
+      const flt =
+        g.flash > 0
+          ? ` filter="drop-shadow(0 0 ${round1(2 + g.flash * 3)}px ${RED})"`
+          : "";
+      if (g.axis === "x") {
+        s += `<line x1="${X(g.cur ?? g.pos)}" y1="0" x2="${X(g.cur ?? g.pos)}" y2="${H}" stroke="${RED}" stroke-width="${sw}" stroke-opacity="${round1(g.op)}"${flt}/>`;
+      } else {
+        s += `<line x1="0" y1="${Y(g.cur ?? g.pos)}" x2="${W}" y2="${Y(g.cur ?? g.pos)}" stroke="${RED}" stroke-width="${sw}" stroke-opacity="${round1(g.op)}"${flt}/>`;
+      }
+    }
+
+    // Edit lines (pen seek: polyline + placed points + chord to cursor)
+    for (const ed of lines) {
+      const p = ed.pts
+        .slice(0, ed.placed)
+        .map((pt) => `${X(pt.x)},${Y(pt.y)}`);
+      if (ed.owner) p.push(`${X(ed.owner.x)},${Y(ed.owner.y)}`);
+      s += `<polyline points="${p.join(" ")}" fill="none" stroke="${OV_BLUE}" stroke-width="1.5"/>`;
+      for (const q of ed.pts.slice(0, ed.placed))
+        s += `<circle cx="${X(q.x)}" cy="${Y(q.y)}" r="3.6" fill="#fff" stroke="${OV_BLUE}" stroke-width="1.5"/>`;
+    }
+
+    // Cursor-attached overlays (selections / measures)
+    let b = "";
+    for (const v of specs) {
+      if (v.t === "box") {
+        const x = Math.min(v.b.x, v.b.x + v.b.w);
+        const y = Math.min(v.b.y, v.b.y + v.b.h);
+        const w = Math.abs(v.b.w);
+        const h = Math.abs(v.b.h);
+        const lx = X(x);
+        const ly = Y(y);
+        const col = v.color === "red" ? RED : OV_BLUE;
+        s += `<rect x="${lx}" y="${ly}" width="${round1(w)}" height="${round1(h)}" fill="none" stroke="${col}" stroke-width="1"/>`;
+        if (v.underline && v.underline.w > 0) {
+          const u = v.underline;
+          s += `<line x1="${X(u.x)}" y1="${Y(u.y)}" x2="${X(u.x + u.w)}" y2="${Y(u.y)}" stroke="${OV_BLUE}" stroke-width="1.5"/>`;
+        }
+        if (v.handles)
+          for (const [hx, hy] of [
+            [lx, ly],
+            [lx + w, ly],
+            [lx, ly + h],
+            [lx + w, ly + h],
+          ])
+            s += `<rect x="${round1(hx - 3.5)}" y="${round1(hy - 3.5)}" width="7" height="7" fill="#fff" stroke="${col}" stroke-width="1"/>`;
+        if (v.badge && w > 2)
+          b += `<div class="badge" style="left:${round1(lx + w / 2)}px;top:${round1(ly + h + 8)}px;background:${col}">${v.badge}</div>`;
+      } else if (v.t === "measure" && v.a && v.label) {
+        const ax = X(v.a.x);
+        const ay = Y(v.a.y);
+        const bx = X(v.b.x);
+        const by = Y(v.b.y);
+        s += `<line x1="${ax}" y1="${ay}" x2="${bx}" y2="${by}" stroke="${RED}" stroke-width="1"/>`;
+        const horiz = ay === by;
+        b += `<div class="badge" style="left:${round1(horiz ? (ax + bx) / 2 : ax + 18)}px;top:${round1(horiz ? ay + 8 : (ay + by) / 2 - 9)}px;background:${RED}">${v.label}</div>`;
+      }
+    }
+
+    if (s !== this._ovS) {
+      this.fx.innerHTML = s;
+      this._ovS = s;
+    }
+    if (b !== this._ovB) {
+      this.badges.innerHTML = b;
+      this._ovB = b;
+    }
+  }
+
+  // ── Cursor sprites ────────────────────────────────────────────────────────
+
+  private cursorEls = new Map<number, HTMLDivElement>();
+
+  /** Position + shape-sync every cursor sprite. */
+  renderCursors(cursors: Cursor[], sx: number, sy: number): void {
+    for (const c of cursors) {
+      let el = this.cursorEls.get(c.id);
       if (!el) {
         el = document.createElement("div");
-        el.className = "guide";
-        el.style.top = "0";
-        el.style.height = "120%";
-        el.style.left = `${g.pos}px`;
-        this.fx.appendChild(el);
-        (g as Guide & { _el?: HTMLElement })._el = el;
+        el.className = "cspr";
+        const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+        svg.setAttribute("viewBox", "0 0 28 28");
+        svg.setAttribute("width", "28");
+        svg.setAttribute("height", "28");
+        svg.style.overflow = "visible";
+        el.appendChild(svg);
+        this.cursorsEl.appendChild(el);
+        this.cursorEls.set(c.id, el);
       }
-      el.style.opacity = String(alpha);
+      el.style.transform = `translate(${Math.round((c.x - sx) * 10) / 10}px,${Math.round((c.y - sy) * 10) / 10}px)`;
+      const svg = el.firstChild as SVGElement;
+      const key = `${c.shape}|${c.color}`;
+      if (el.dataset.shp !== key) {
+        svg.innerHTML = cursorSVG(c.shape, c.color);
+        el.dataset.shp = key;
+        const hot = HOTSPOT[c.shape as CursorShape];
+        cel(el)._hx = hot.x;
+        cel(el)._hy = hot.y;
+        svg.style.transformOrigin = `${hot.x}px ${hot.y}px`;
+      }
+      const sc = 1 - c.press * 0.12;
+      svg.style.transform = `translate(${-cel(el)._hx}px,${-cel(el)._hy}px) rotate(${Math.round(c.angle * 10) / 10}deg) scale(${round2(sc)})`;
+    }
+    for (const [id, el] of this.cursorEls) {
+      if (!cursors.some((c) => c.id === id)) {
+        el.remove();
+        this.cursorEls.delete(id);
+      }
     }
   }
 
@@ -368,6 +571,21 @@ export function getShadowRoot(): ShadowRoot | null {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+interface CursorEl extends HTMLDivElement {
+  _hx: number;
+  _hy: number;
+}
+function cel(el: HTMLDivElement): CursorEl {
+  return el as CursorEl;
+}
+
+function round1(n: number): string {
+  return (Math.round(n * 10) / 10).toString();
+}
+function round2(n: number): string {
+  return (Math.round(n * 100) / 100).toString();
+}
+
 function clipInner(clip: { l: number; t: number; r: number; b: number }, x: number, y: number, w: number, h: number): string {
   const top = Math.max(0, clip.t - y);
   const bottom = Math.max(0, y + h - clip.b);
@@ -380,6 +598,22 @@ function clipInner(clip: { l: number; t: number; r: number; b: number }, x: numb
 /** Extract a thin representative border shorthand from captured paint css. */
 function bodyLineColor(): string {
   return "rgba(148,163,184,0.5)";
+}
+
+function revealUnits(item: SwarmItem, shown: number): void {
+  if (!item.typed) return;
+  for (const u of item.typed.units) {
+    if (u.t && u.src !== undefined) {
+      const keep = Math.max(0, Math.min(u.src.length, shown - u.at));
+      const next = u.src.slice(0, keep);
+      if (u.t.data !== next) u.t.data = next; // Porsche-fast dedupe
+    } else if (u.e) {
+      const on = shown > u.at;
+      if (on !== (u.e.style.visibility === "visible")) {
+        u.e.style.visibility = on ? "visible" : "hidden";
+      }
+    }
+  }
 }
 
 /** Hide all typed units of a text item before its build starts. */
