@@ -876,13 +876,19 @@ export async function captureItems(aborted?: () => boolean): Promise<CaptureResu
     const s = el.getAttribute("style") ?? "";
     return s.includes("opacity") || s.includes("transform");
   });
+  // Precompute world-space tops once: rect.top + scrollY is scroll-invariant,
+  // so each drain poll filters numerically instead of calling
+  // getBoundingClientRect on every framer-styled element (the dominant
+  // per-poll cost — hundreds of elements × up to 5 polls × 12 bands).
+  const revealPos = revealNodes.map((el) => {
+    const r = el.getBoundingClientRect();
+    return { el, top: r.top + window.scrollY, h: r.height, w: r.width };
+  });
   const countPending = (bandTop: number, bandBot: number): number => {
     let n = 0;
-    for (const el of revealNodes) {
-      const r = el.getBoundingClientRect();
-      if (r.height <= 0 || r.width <= 0) continue;
-      const yTop = r.top + window.scrollY;
-      if (yTop + r.height < bandTop - 60 || yTop > bandBot + 60) continue;
+    for (const { el, top, h, w } of revealPos) {
+      if (h <= 0 || w <= 0) continue;
+      if (top + h < bandTop - 60 || top > bandBot + 60) continue;
       const cs = window.getComputedStyle(el);
       const op = parseFloat(cs.opacity || "1");
       if (op < 0.92 && cs.animationName === "none") n++;
