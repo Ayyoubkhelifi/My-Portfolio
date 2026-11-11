@@ -121,7 +121,6 @@ export function SwarmIntro() {
           return;
         }
         if (policy.isReplay) resetPlayed();
-        markPlayed();
         stage("policy-play");
 
         const config = PROFILE_CONFIG[policy.profile];
@@ -142,9 +141,12 @@ export function SwarmIntro() {
         stage("hidden");
 
         // 3. Capture (sweep + per-band walk happen under the stage surface).
+        //     Aborts immediately if the effect was disposed (Strict Mode
+        //     unmounts its first run — the orphan must not keep scrolling).
         stage("capturing");
-        const capture = await captureItems();
+        const capture = await captureItems(() => disposed);
         if (disposed) return;
+        markPlayed();
         stage("captured");
         if (process.env.NODE_ENV === "development") {
           console.log(

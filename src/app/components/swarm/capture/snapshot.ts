@@ -730,8 +730,16 @@ function findGuides(items: SwarmItem[]): CaptureResult["guides"] {
 const BATCH = 32;
 
 function yieldToMain(): Promise<void> {
+  // MessageChannel macrotask: yields to the event loop without waiting for a
+  // paint. The stage surface is static during capture, so no per-batch paint
+  // is needed — this keeps the walk fast (rAF costs a full frame each time).
   return new Promise<void>((resolve) => {
-    requestAnimationFrame(() => resolve());
+    const ch = new MessageChannel();
+    ch.port1.onmessage = () => {
+      ch.port1.close();
+      resolve();
+    };
+    ch.port2.postMessage(0);
   });
 }
 
@@ -797,17 +805,35 @@ export function quickStage(): {
   return { bg: color, image, size, pos, docW, docH };
 }
 
-export async function captureItems(): Promise<CaptureResult> {
+/**
+ * @param aborted polled between async steps — lets a disposed/unmounted
+ *              intro stop the scroll choreography immediately (React Strict
+ *              Mode unmounts the first effect run milliseconds after it
+ *              starts; without this, the orphaned capture kept scrolling
+ *              the now-visible page for tens of seconds).
+ */
+export async function captureItems(aborted?: () => boolean): Promise<CaptureResult> {
+  const isAbort = (): boolean => aborted?.() ?? false;
   const t0 = performance.now();
   const log = (m: string) => {
     if (process.env.NODE_ENV === "development") console.log(`[capture] ${m}`);
   };
   // Pass 1 — quick scroll sweep: force lazy images + kick off entrance
   // animations (the stage overlay already covers the viewport by now).
-  const { sy, sx } = await waitForScrollSettle();
+  const { sy, sx } = await waitForScrollSettle(isAbort);
   void sy;
   void sx;
   log(`sweep ${Math.round(performance.now() - t0)}ms`);
+  if (isAbort()) {
+    return {
+      items: [],
+      groups: [],
+      guides: [],
+      docW: document.documentElement.scrollWidth,
+      docH: document.documentElement.scrollHeight,
+      bgColor: "",
+    };
+  }
 
   // Post-sweep geometry (lazy content may have grown the document).
   const docW = document.documentElement.scrollWidth;
@@ -837,8 +863,8 @@ export async function captureItems(): Promise<CaptureResult> {
   // their final (fully revealed) styles this way; `captured` de-dupes.
   const vh = window.innerHeight;
   const maxScroll = Math.max(0, docH - vh);
-  const STEP = Math.max(120, Math.round(vh * 0.95));
-  const BAND_SETTLE_MS = 480;
+  const STEP = Math.max(120, vh);
+  const BAND_SETTLE_MS = 150;
 
   // Scroll-reveal nodes (framer-motion sets inline opacity/transform styles).
   // Most keep animating after the fixed settle; poll until the pending count
@@ -867,6 +893,7 @@ export async function captureItems(): Promise<CaptureResult> {
   const rootChildren = Array.from(document.body.children);
   let bandMs = 0;
   for (let y = 0; ; y += STEP) {
+    if (isAbort()) break;
     const bandY = Math.min(y, maxScroll);
     window.scrollTo(0, bandY);
     await new Promise<void>((resolve) => setTimeout(resolve, BAND_SETTLE_MS));
@@ -875,8 +902,8 @@ export async function captureItems(): Promise<CaptureResult> {
     // opacity forever) — break instead of stalling the capture.
     let prev = countPending(bandY, bandY + vh);
     let stagnant = 0;
-    for (let i = 0; i < 7 && prev > 0; i++) {
-      await new Promise<void>((resolve) => setTimeout(resolve, 260));
+    for (let i = 0; i < 5 && prev > 0 && !isAbort(); i++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 160));
       const now = countPending(bandY, bandY + vh);
       if (now === prev) {
         if (++stagnant >= 2) break;
@@ -898,7 +925,10 @@ export async function captureItems(): Promise<CaptureResult> {
     for (const child of rootChildren) {
       const tb = performance.now();
       walkNode(child, ctx);
-      if (++batch % 2 === 0) await yieldToMain();
+      if (++batch % 3 === 0) {
+        await yieldToMain();
+        if (isAbort()) break;
+      }
       bandMs += performance.now() - tb;
     }
     log(`band@${bandY} items=${ctx.items.length} walk=${Math.round(bandMs)}ms total=${Math.round(performance.now() - t0)}ms`);
@@ -907,7 +937,7 @@ export async function captureItems(): Promise<CaptureResult> {
 
   // Return to the top so the choreography (and the engine's frontier) start there.
   window.scrollTo(0, 0);
-  await new Promise<void>((resolve) => setTimeout(resolve, 150));
+  if (!isAbort()) await new Promise<void>((resolve) => setTimeout(resolve, 150));
 
   findGroups(ctx);
   const guides = findGuides(ctx.items);
