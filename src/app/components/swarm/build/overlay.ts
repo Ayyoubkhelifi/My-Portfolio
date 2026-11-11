@@ -215,7 +215,7 @@ export class View {
     this.hudDots.style.cssText = "display:flex;";
     hud.appendChild(this.hudDots);
     this.hudText = document.createElement("span");
-    this.hudText.textContent = "building…";
+    this.hudText.textContent = "gathering layers…";
     hud.appendChild(this.hudText);
     const bar = document.createElement("div");
     bar.className = "bar";
@@ -226,6 +226,24 @@ export class View {
 
     document.documentElement.appendChild(this.host);
     View._shadow = this.shadow;
+  }
+
+  /** Lazy-loaded content can grow the document between mount and capture. */
+  resizeWorld(docW: number, docH: number): void {
+    if (!this._mounted || !this.world) return;
+    this.world.style.width = `${docW}px`;
+    this.world.style.height = `${docH}px`;
+  }
+
+  /** Backdrop fill (real page bg color + raw background-image CSS, e.g. grid gradients). */
+  setBackdrop(imageCss: string, size: string, pos: string): void {
+    if (!this._mounted || !this.surface) return;
+    if (imageCss) {
+      this.surface.style.backgroundImage = imageCss;
+      this.surface.style.backgroundSize = size || "auto";
+      this.surface.style.backgroundPosition = pos || "0 0";
+      this.surface.style.backgroundRepeat = "repeat";
+    }
   }
 
   private hudDots!: HTMLSpanElement;

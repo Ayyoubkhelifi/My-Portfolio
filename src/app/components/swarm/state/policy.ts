@@ -186,18 +186,18 @@ export const PROFILE_CONFIG: Record<Exclude<SwarmProfile, "skip">, ProfileConfig
     agentMin: 8,
     agentMax: 24,
     speed: 1.5,
-    durationMax: 36,
+    durationMax: 40,
   },
   mid: {
     agentMin: 6,
     agentMax: 16,
     speed: 1.8,
-    durationMax: 32,
+    durationMax: 36,
   },
   mobile: {
     agentMin: 4,
     agentMax: 10,
     speed: 2.2,
-    durationMax: 18,
+    durationMax: 22,
   },
 };

@@ -121,6 +121,7 @@ export class Engine implements RoutineHost {
   private rafId: number | null = null;
   private lastTs: number | null = null;
   private paused = false;
+  private autoPaused = false;
   private aborted = false;
   private started = false;
   private flocking = false;
@@ -473,6 +474,19 @@ export class Engine implements RoutineHost {
     this.rafId = requestAnimationFrame(this.tickFrame);
   }
 
+  /** Pause triggered by tab-hidden (reversible by the visibility watchdog). */
+  autoPause(): void {
+    if (this.paused || this.aborted) return;
+    this.autoPaused = true;
+    this.pause();
+  }
+
+  autoResume(): void {
+    if (!this.autoPaused) return;
+    this.autoPaused = false;
+    this.resume();
+  }
+
   abort(): void {
     this.aborted = true;
     if (this.rafId !== null) {
@@ -788,10 +802,18 @@ export class Engine implements RoutineHost {
     const backlog = this.backlog();
     // Zero backlog = frontier is ahead of all buildable work → skip the gap fast.
     const gapTier =
-      backlog === 0 ? 1100 : backlog <= Math.max(4, crew * 0.6) ? 230 : backlog <= crew * 1.5 ? 80 : 0;
+      backlog === 0
+        ? 900
+        : backlog <= 3
+          ? 170
+          : backlog <= Math.max(3, crew * 0.6)
+            ? 95
+            : backlog <= crew * 1.6
+              ? 45
+              : 0;
     // Late in the build (long page), gently rush the tour so pacing scales
     // with page length instead of the fixed reference demo's 1-2 screens.
-    const rush = 1 + Math.min(1.2, (this.elapsed / Math.max(1, this.profile.durationMax)) * 1.6);
+    const rush = 1 + Math.min(0.9, (this.elapsed / Math.max(1, this.profile.durationMax)) * 1.1);
     const target = gapTier === 0 ? 0 : gapTier > 400 ? gapTier : gapTier * rush;
     this.tourV += (target - this.tourV) * Math.min(1, dt * 2.5);
     this.tourAcc += this.tourV * dt;
@@ -1131,7 +1153,7 @@ export class Engine implements RoutineHost {
     return { x: Math.min(x, it.x + it.w), y: Math.min(y, it.y + it.h) };
   }
 
-  sfxPlace(_kind: string, _it?: SwarmItem, _b?: Box): void {
+  sfxPlace(): void {
     this.sound.playElementResolve();
   }
 

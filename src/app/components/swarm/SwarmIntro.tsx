@@ -21,7 +21,7 @@
 import { useEffect } from "react";
 import { resolvePolicy, PROFILE_CONFIG } from "./state/policy";
 import { hasPlayed, markPlayed, resetPlayed, isSoundEnabled } from "./state/session";
-import { captureItems } from "./capture/snapshot";
+import { captureItems, quickStage } from "./capture/snapshot";
 import {
   hideBody,
   revealNow,
@@ -87,11 +87,17 @@ export function SwarmIntro() {
     disposers.push(() => document.removeEventListener("keydown", onKeyDown));
 
     function onVisibility() {
-      if (document.visibilityState === "hidden") engine?.pause();
-      else engine?.resume();
+      if (document.visibilityState === "hidden") engine?.autoPause();
+      else engine?.autoResume();
     }
     document.addEventListener("visibilitychange", onVisibility);
     disposers.push(() => document.removeEventListener("visibilitychange", onVisibility));
+    // Watchdog: some environments drop the "visible" transition event, which
+    // would leave the intro paused forever. Auto-pauses are reversible only.
+    const visWatchdog = window.setInterval(() => {
+      if (document.visibilityState === "visible") engine?.autoResume();
+    }, 1000);
+    disposers.push(() => window.clearInterval(visWatchdog));
 
     function onPageShow(e: PageTransitionEvent) {
       if (e.persisted) {
@@ -120,11 +126,22 @@ export function SwarmIntro() {
 
         const config = PROFILE_CONFIG[policy.profile];
 
-        // 1. Hide the page BEFORE capturing so the sweep/capture is invisible.
+        // 1. Stage FIRST — bg is read without scrolling, so the viewport shows
+        //    the real page backdrop instead of a bare scroll. Mounting before
+        //    hideBody also means a mount failure leaves the site visible.
+        stage("staging");
+        const quick = quickStage();
+        const view = new View();
+        view.mount(quick.bg, quick.docW, quick.docH);
+        view.setBackdrop(quick.image, quick.size, quick.pos);
+        registerOverlayHost(view.host);
+
+        // 2. Hide the page BEFORE capturing so the sweep/capture is invisible.
+        //    (Same task as the mount — no painted frame in between.)
         hideBody();
         stage("hidden");
 
-        // 2. Capture (includes the hidden scroll sweep).
+        // 3. Capture (sweep + per-band walk happen under the stage surface).
         stage("capturing");
         const capture = await captureItems();
         if (disposed) return;
@@ -134,12 +151,11 @@ export function SwarmIntro() {
             `[SwarmIntro] capture: ${capture.items.length} items, ${capture.groups.length} groups, doc ${capture.docW}x${capture.docH}`
           );
         }
+        if (capture.docH !== quick.docH || capture.docW !== quick.docW) {
+          view.resizeWorld(capture.docW, capture.docH);
+        }
 
-        // 3. Stage + swarm + controls.
-        const view = new View();
-        view.mount(capture.bgColor, capture.docW, capture.docH);
-        registerOverlayHost(view.host);
-
+        // 4. Engine + controls.
         engine = new Engine(view, sound, capture, config, policy.seed, {
           onComplete: () => {
             void handleComplete();

@@ -133,9 +133,25 @@ function isPainted(computed: CSSStyleDeclaration, rect: DOMRect): boolean {
   return Boolean(opaque || bgImage !== "none" || shadow || bt || br || bb || bl || radius);
 }
 
-/** True when the element has any visible text; ignores whitespace-only nodes. */
+/** True when the element has any visible text; ignores whitespace-only nodes.
+ *  Bounded iterative scan — avoids building `textContent` strings for every
+ *  wrapper (the old whole-subtree scan dominated band-walk time). */
 function hasVisibleText(el: Element): boolean {
-  return /\S/.test(el.textContent ?? "");
+  const stack: Node[] = [el];
+  let visits = 0;
+  while (stack.length && visits < 400) {
+    const n = stack.pop()!;
+    if (n.nodeType === 3) {
+      if (/\S/.test(n.nodeValue ?? "")) return true;
+      continue;
+    }
+    if (n.nodeType !== 1) continue;
+    const tag = (n as Element).tagName;
+    if (tag === "SCRIPT" || tag === "STYLE" || tag === "NOSCRIPT") continue;
+    visits++;
+    for (let c = n.firstChild; c; c = c.nextSibling) stack.push(c);
+  }
+  return false;
 }
 
 /** Block-level or safely-inline (for text leaf detection). */
@@ -216,6 +232,22 @@ function buildTypedClone(el: Element): SwarmItem["typed"] | null {
 
 // ─── Walker context ───────────────────────────────────────────────────────────
 
+/** Transform-safe size read: framer-motion springs continuously oscillate
+ *  `transform: scale()` on several wrappers; a getBoundingClientRect caught
+ *  mid-squash measures fractions of a pixel and would prune entire card
+ *  subtrees. offsetWidth/offsetHeight ignore ancestor transforms, so when the
+ *  rect is drastically smaller than the layout box, prefer the layout box. */
+function visualSize(el: Element, rect: DOMRect): { w: number; h: number } {
+  if (!(el instanceof HTMLElement)) return { w: rect.width, h: rect.height };
+  const ow = el.offsetWidth;
+  const oh = el.offsetHeight;
+  if (!ow || !oh) return { w: rect.width, h: rect.height };
+  return {
+    w: rect.width < ow * 0.25 ? ow : rect.width,
+    h: rect.height < oh * 0.25 ? oh : rect.height,
+  };
+}
+
 interface WalkCtx {
   sy: number;
   sx: number;
@@ -225,6 +257,16 @@ interface WalkCtx {
   items: SwarmItem[];
   groups: DupGroup[];
   nextId: { id: number };
+  /**
+   * Per-band capture: when scrolling-reveal libraries (framer-motion
+   * whileInView, GSAP reveal) reverse elements out of view, a single
+   * top-walk would prune whole sections. We instead walk once per
+   * viewport band while the band is in view, recording settled styles.
+   * `band` prunes subtrees outside the visible band; `captured`
+   * prevents duplicate emission across bands.
+   */
+  band?: { top: number; bot: number } | null;
+  captured?: WeakSet<Element>;
 }
 
 function toWorld(ctx: WalkCtx, rect: DOMRect): {
@@ -239,6 +281,23 @@ function toWorld(ctx: WalkCtx, rect: DOMRect): {
     w: rect.width,
     h: rect.height,
   };
+}
+
+/**
+ * Mark an element as captured so later bands don't re-emit it. Leaves are
+ * marked when they *start* inside the band (a leaf crossing the bottom edge
+ * is emitted whole here, so still marked). Containers are marked only when
+ * they *end* inside the band — a wrapper taller than the band must stay
+ * unmarked so later bands re-walk its below-fold children.
+ */
+function markCaptured(el: Element, ctx: WalkCtx, isContainer: boolean): void {
+  if (!ctx.captured || !ctx.band) return;
+  const r = el.getBoundingClientRect();
+  if (isContainer) {
+    if (r.bottom + ctx.sy <= ctx.band.bot + 8) ctx.captured.add(el);
+  } else if (r.bottom + ctx.sy > ctx.band.top + 8) {
+    ctx.captured.add(el);
+  }
 }
 
 function intersectsClip(clip: ClipBox | null, x: number, y: number, w: number, h: number) {
@@ -294,19 +353,19 @@ function intersectClip(a: ClipBox, b: ClipBox): ClipBox {
 
 // ─── Walkers ──────────────────────────────────────────────────────────────────
 
-function walkTextEl(el: Element, ctx: WalkCtx): void {
+function walkTextEl(el: Element, ctx: WalkCtx): boolean {
   const cs = window.getComputedStyle(el);
   // Note: the element itself may be block-level (h1, p, div) — walkNode has
   // already verified it contains only inline-ish children. The element just
   // needs to own visible text.
-  if (!hasVisibleText(el)) return;
+  if (!hasVisibleText(el)) return false;
   const rect = el.getBoundingClientRect();
-  if (rect.width < 4 || rect.height < 4) return;
+  if (rect.width < 4 && visualSize(el, rect).h < 4) return false;
   const g = toWorld(ctx, rect);
-  if (!intersectsClip(ctx.clip, g.x, g.y, g.w, g.h)) return;
+  if (!intersectsClip(ctx.clip, g.x, g.y, g.w, g.h)) return false;
 
   const typed = buildTypedClone(el);
-  if (!typed) return;
+  if (!typed) return false;
 
   const fs = parseFloat(cs.fontSize);
   const item = pushItem(ctx, {
@@ -330,21 +389,23 @@ function walkTextEl(el: Element, ctx: WalkCtx): void {
     big: fs >= 30,
   });
   item.parent = ctx.parent ?? undefined;
+  return true;
 }
 
-function walkImageEl(el: HTMLImageElement, ctx: WalkCtx): void {
+function walkImageEl(el: HTMLImageElement, ctx: WalkCtx): boolean {
   const rect = el.getBoundingClientRect();
-  if (rect.width < 8 || rect.height < 8) return;
+  const vis = visualSize(el, rect);
+  if (vis.w < 8 || vis.h < 8) return false;
   const cs = window.getComputedStyle(el);
   const g = toWorld(ctx, rect);
-  if (!intersectsClip(ctx.clip, g.x, g.y, g.w, g.h)) return;
+  if (!intersectsClip(ctx.clip, g.x, g.y, g.w, g.h)) return false;
   const item = pushItem(ctx, {
     id: 0,
     kind: "image",
     x: g.x,
     y: g.y,
-    w: Math.ceil(rect.width),
-    h: Math.ceil(rect.height),
+    w: Math.ceil(vis.w),
+    h: Math.ceil(vis.h),
     clip: effectiveClip(el, ctx, ctx.clip),
     op: cs.opacity === "1" ? 1 : parseFloat(cs.opacity || "1"),
     css: paintCss(cs),
@@ -352,15 +413,17 @@ function walkImageEl(el: HTMLImageElement, ctx: WalkCtx): void {
     fit: cs.objectFit,
   });
   item.parent = ctx.parent ?? undefined;
+  return true;
 }
 
-function walkSvgEl(el: SVGElement, ctx: WalkCtx): void {
+function walkSvgEl(el: SVGElement, ctx: WalkCtx): boolean {
   const rect = el.getBoundingClientRect();
-  if (rect.width < 8 || rect.height < 8) return;
-  if (el.outerHTML.length > SVG_INLINE_BYTE_LIMIT) return; // spotlights etc.
+  const vis = visualSize(el, rect);
+  if (vis.w < 8 || vis.h < 8) return false;
+  if (el.outerHTML.length > SVG_INLINE_BYTE_LIMIT) return false; // spotlights etc.
   const cs = window.getComputedStyle(el);
   const g = toWorld(ctx, rect);
-  if (!intersectsClip(ctx.clip, g.x, g.y, g.w, g.h)) return;
+  if (!intersectsClip(ctx.clip, g.x, g.y, g.w, g.h)) return false;
 
   // Clone inline, sized to the captured box.
   const inert = document.implementation.createHTMLDocument("swarm");
@@ -378,8 +441,8 @@ function walkSvgEl(el: SVGElement, ctx: WalkCtx): void {
     kind: "image",
     x: g.x,
     y: g.y,
-    w: Math.ceil(rect.width),
-    h: Math.ceil(rect.height),
+    w: Math.ceil(vis.w),
+    h: Math.ceil(vis.h),
     clip: effectiveClip(el, ctx, ctx.clip),
     op: cs.opacity === "1" ? 1 : parseFloat(cs.opacity || "1"),
     css: "",
@@ -387,17 +450,43 @@ function walkSvgEl(el: SVGElement, ctx: WalkCtx): void {
   });
   item.svgHtml = html;
   item.parent = ctx.parent ?? undefined;
+  return true;
 }
 
-/** Painted rect container: emit + recurse children inside its clip. */
-function walkRectEl(el: Element, ctx: WalkCtx, depth: number): void {
+/** Painted rect container: emit (+ recurse children inside its clip).
+ *  `skipEmit` is used by band capture: a painted box that started above the
+ *  current band was already emitted in the band that first contained it. */
+function walkRectEl(el: Element, ctx: WalkCtx, depth: number, skipEmit = false): void {
   const cs = window.getComputedStyle(el);
   const rect = el.getBoundingClientRect();
+  const vis = visualSize(el, rect);
   const g = toWorld(ctx, rect);
-  if (g.w < 2 || g.h < 2) return;
+  if (vis.w !== rect.width || vis.h !== rect.height) {
+    // mid-transform squash: recover layout metrics, keep rect-derived position
+    g.w = vis.w;
+    g.h = vis.h;
+  }
+  if (g.w < 2 || g.h < 2) {
+    // Zero-layout visual holder (e.g. framer-motion pin rows whose real
+    // geometry lives in absolutely-positioned children): still descend.
+    if (depth < 60 && ctx.items.length < MAX_ITEMS) {
+      const ownClip0 = clipOf(el, ctx.sy, ctx.sx);
+      walkChildren(
+        el,
+        {
+          ...ctx,
+          clip: ownClip0 ? intersectClip(ctx.clip ?? ownClip0, ownClip0) : ctx.clip,
+          parent: ctx.parent,
+        },
+        depth
+      );
+    }
+    return;
+  }
 
   let item: SwarmItem | null = null;
-  if (isPainted(cs, rect)) {
+  const paintRect = g.w === rect.width && g.h === rect.height ? rect : new DOMRect(g.x, g.y, g.w, g.h);
+  if (isPainted(cs, paintRect) && !skipEmit) {
     item = pushItem(ctx, {
       id: 0,
       kind: "rect",
@@ -420,18 +509,22 @@ function walkRectEl(el: Element, ctx: WalkCtx, depth: number): void {
       : ownClip
         ? intersectClip(ctx.clip ?? ownClip, ownClip)
         : ctx.clip;
-  if (depth < 40 && ctx.items.length < MAX_ITEMS) {
-    walkChildren(el, {
-      ...ctx,
-      clip: innerClip,
-      parent: item ?? ctx.parent,
-    });
+  if (depth < 60 && ctx.items.length < MAX_ITEMS) {
+    walkChildren(
+      el,
+      {
+        ...ctx,
+        clip: innerClip,
+        parent: item ?? ctx.parent,
+      },
+      depth
+    );
   }
 }
 
-function walkChildren(el: Element, ctx: WalkCtx): void {
+function walkChildren(el: Element, ctx: WalkCtx, depth = 0): void {
   for (const child of Array.from(el.children)) {
-    walkNode(child, ctx);
+    walkNode(child, ctx, depth + 1);
   }
 }
 
@@ -445,11 +538,30 @@ function walkNode(el: Element, ctx: WalkCtx, depth = 0): void {
   const cs = window.getComputedStyle(el);
   const tag = el.tagName.toLowerCase();
 
+  // Band pruning: skip subtrees outside the currently visible band so the
+  // walker reads settled (post-entrance-animation) styles for each viewport.
+  // Client rects are converted to world coords via the current scroll offset.
+  if (ctx.band && ctx.captured) {
+    if (ctx.captured.has(el)) return;
+    const rectB = el.getBoundingClientRect();
+    const topW = rectB.top + ctx.sy;
+    const botW = rectB.bottom + ctx.sy;
+    if (topW > ctx.band.bot) return; // fully below — a later band covers it
+    if (botW < ctx.band.top + 8) return; // above — emitted in an earlier band
+  }
+
   // Visibility pruning
   if (cs.display === "none" || cs.visibility === "hidden") return;
   if (cs.opacity === "0" && cs.animationName === "none") return;
   const rect0 = el.getBoundingClientRect();
-  if (rect0.width < 1 && rect0.height < 1) return;
+  const vis0 = visualSize(el, rect0);
+  if (vis0.w < 1 && vis0.h < 1) {
+    // Zero-layout anchor (framer-motion pin rows park their real geometry in
+    // absolutely-positioned children): don't prune — descend, the children
+    // carry the actual boxes.
+    if (depth < 60) walkChildren(el, extendCtxForChildren(el, ctx), depth);
+    return;
+  }
 
   // Exclusions (canvas, spotlights, nav, lottie…)
   const excl = checkExclusion(el, cs, rect0);
@@ -458,7 +570,7 @@ function walkNode(el: Element, ctx: WalkCtx, depth = 0): void {
   }
 
   if (el instanceof SVGElement) {
-    walkSvgEl(el, ctx);
+    if (walkSvgEl(el, ctx)) markCaptured(el, ctx, false);
     return;
   }
 
@@ -473,17 +585,18 @@ function walkNode(el: Element, ctx: WalkCtx, depth = 0): void {
       isBlockish(window.getComputedStyle(c))
     );
     if (!blockKids) {
-      walkTextEl(el, ctx);
+      if (walkTextEl(el, ctx)) markCaptured(el, ctx, false);
       return;
     }
   }
 
   if (el instanceof HTMLImageElement) {
-    walkImageEl(el, ctx);
+    if (walkImageEl(el, ctx)) markCaptured(el, ctx, false);
     return;
   }
 
   if (tag === "hr") {
+    markCaptured(el, ctx, false);
     const rect = el.getBoundingClientRect();
     const g = toWorld(ctx, rect);
     const item = pushItem(ctx, {
@@ -502,7 +615,12 @@ function walkNode(el: Element, ctx: WalkCtx, depth = 0): void {
   }
 
   if (isPainted(cs, rect0) || el instanceof HTMLElement) {
-    walkRectEl(el, ctx, depth);
+    // In band mode, a painted box whose top started above this band was
+    // already emitted in the band that first contained it — recurse only.
+    const skipEmit =
+      !!ctx.band && isPainted(cs, rect0) && rect0.top + ctx.sy < ctx.band.top - 8;
+    if (!skipEmit) markCaptured(el, ctx, true);
+    walkRectEl(el, ctx, depth, skipEmit);
     return;
   }
 
@@ -617,15 +735,86 @@ function yieldToMain(): Promise<void> {
   });
 }
 
-export async function captureItems(): Promise<CaptureResult> {
-  // Hidden pre-sweep: force lazy content + settle layout (body already hidden)
-  const { sy, sx } = await waitForScrollSettle();
+export function quickStage(): {
+  bg: string;
+  image: string;
+  size: string;
+  pos: string;
+  docW: number;
+  docH: number;
+} {
+  const docW = document.documentElement.scrollWidth;
+  const docH = document.documentElement.scrollHeight;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
 
+  // The stage backdrop should match what the visitor actually sees: find the
+  // first full-viewport ancestor that paints a background (color or image).
+  // The real layers come from the capture; this just covers the pre-engine gap.
+  let color = "";
+  let image = "";
+  let size = "";
+  let pos = "";
+  const dfs = (el: Element, depth: number): void => {
+    if (depth > 6 || (color && image)) return;
+    for (const c of el.children) {
+      const r = c.getBoundingClientRect();
+      if (r.width * r.height < vw * vh * 0.6) {
+        dfs(c, depth + 1);
+        continue;
+      }
+      const cs = window.getComputedStyle(c);
+      // Animated decorative layers (conic "spotlight" spinners etc.) fill
+      // huge rects via negative insets but read as the whole viewport — they
+      // are not the backdrop. Same for invisible layers.
+      if (cs.animationName !== "none" || cs.opacity === "0") {
+        dfs(c, depth + 1);
+        continue;
+      }
+      const col = cs.backgroundColor;
+      const img = cs.backgroundImage;
+      // A color-only match is not final: the grid usually lives on a deeper
+      // stacked layer (CSS gradients, not image URLs) — keep descending for it.
+      if (img && img !== "none" && !image) {
+        image = img;
+        size = cs.backgroundSize;
+        pos = cs.backgroundPosition;
+      }
+      if (!color && col !== "rgba(0, 0, 0, 0)") color = col;
+      if (color && image) return;
+      dfs(c, depth + 1);
+    }
+  };
+  dfs(document.body, 0);
+
+  if (!color && !image) {
+    const bodyCs = window.getComputedStyle(document.body);
+    color =
+      bodyCs.backgroundColor === "rgba(0, 0, 0, 0)"
+        ? window.getComputedStyle(document.documentElement).backgroundColor
+        : bodyCs.backgroundColor;
+  }
+  return { bg: color, image, size, pos, docW, docH };
+}
+
+export async function captureItems(): Promise<CaptureResult> {
+  const t0 = performance.now();
+  const log = (m: string) => {
+    if (process.env.NODE_ENV === "development") console.log(`[capture] ${m}`);
+  };
+  // Pass 1 — quick scroll sweep: force lazy images + kick off entrance
+  // animations (the stage overlay already covers the viewport by now).
+  const { sy, sx } = await waitForScrollSettle();
+  void sy;
+  void sx;
+  log(`sweep ${Math.round(performance.now() - t0)}ms`);
+
+  // Post-sweep geometry (lazy content may have grown the document).
   const docW = document.documentElement.scrollWidth;
   const docH = document.documentElement.scrollHeight;
 
   const ctx: WalkCtx = {
-    sy,
+    sy: 0,
     sx,
     w: docW,
     clip: null,
@@ -633,6 +822,8 @@ export async function captureItems(): Promise<CaptureResult> {
     items: [],
     groups: [],
     nextId: { id: 1 },
+    band: null,
+    captured: new WeakSet<Element>(),
   };
 
   // body's own background color becomes the stage color
@@ -641,13 +832,82 @@ export async function captureItems(): Promise<CaptureResult> {
     ? window.getComputedStyle(document.documentElement).backgroundColor
     : bodyCs.backgroundColor;
 
-  // Walk element tree (the walker recursion is bundled inline below)
+  // Pass 2 — per-band capture: for each viewport band, scroll it into view,
+  // let scroll-reveal animations settle, then walk THAT band. Elements read
+  // their final (fully revealed) styles this way; `captured` de-dupes.
+  const vh = window.innerHeight;
+  const maxScroll = Math.max(0, docH - vh);
+  const STEP = Math.max(120, Math.round(vh * 0.95));
+  const BAND_SETTLE_MS = 480;
+
+  // Scroll-reveal nodes (framer-motion sets inline opacity/transform styles).
+  // Most keep animating after the fixed settle; poll until the pending count
+  // drains — but stop early when the count stagnates (hover-reactive layers
+  // stay at partial opacity forever and must not stall the capture).
+  const revealNodes = Array.from(
+    document.querySelectorAll<HTMLElement>('[style]')
+  ).filter((el) => {
+    const s = el.getAttribute("style") ?? "";
+    return s.includes("opacity") || s.includes("transform");
+  });
+  const countPending = (bandTop: number, bandBot: number): number => {
+    let n = 0;
+    for (const el of revealNodes) {
+      const r = el.getBoundingClientRect();
+      if (r.height <= 0 || r.width <= 0) continue;
+      const yTop = r.top + window.scrollY;
+      if (yTop + r.height < bandTop - 60 || yTop > bandBot + 60) continue;
+      const cs = window.getComputedStyle(el);
+      const op = parseFloat(cs.opacity || "1");
+      if (op < 0.92 && cs.animationName === "none") n++;
+    }
+    return n;
+  };
+
   const rootChildren = Array.from(document.body.children);
-  let batch = 0;
-  for (const child of rootChildren) {
-    walkNode(child, ctx);
-    if (++batch % 2 === 0) await yieldToMain();
+  let bandMs = 0;
+  for (let y = 0; ; y += STEP) {
+    const bandY = Math.min(y, maxScroll);
+    window.scrollTo(0, bandY);
+    await new Promise<void>((resolve) => setTimeout(resolve, BAND_SETTLE_MS));
+    // Drain staggered entrance animations for this band. Two consecutive
+    // equal counts = stagnated (hover-reactive layers rest at partial
+    // opacity forever) — break instead of stalling the capture.
+    let prev = countPending(bandY, bandY + vh);
+    let stagnant = 0;
+    for (let i = 0; i < 7 && prev > 0; i++) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 260));
+      const now = countPending(bandY, bandY + vh);
+      if (now === prev) {
+        if (++stagnant >= 2) break;
+      } else {
+        stagnant = 0;
+        prev = now;
+      }
+    }
+    bandMs = 0;
+    ctx.sy = window.scrollY;
+    ctx.sx = window.scrollX;
+    ctx.band = { top: bandY, bot: bandY + vh };
+    // Reset walk state: ctx.clip / ctx.parent must not leak from the
+    // previous band's descent (a stale world-coord clip box suppresses
+    // every item in this band).
+    ctx.clip = null;
+    ctx.parent = null;
+    let batch = 0;
+    for (const child of rootChildren) {
+      const tb = performance.now();
+      walkNode(child, ctx);
+      if (++batch % 2 === 0) await yieldToMain();
+      bandMs += performance.now() - tb;
+    }
+    log(`band@${bandY} items=${ctx.items.length} walk=${Math.round(bandMs)}ms total=${Math.round(performance.now() - t0)}ms`);
+    if (bandY >= maxScroll) break;
   }
+
+  // Return to the top so the choreography (and the engine's frontier) start there.
+  window.scrollTo(0, 0);
+  await new Promise<void>((resolve) => setTimeout(resolve, 150));
 
   findGroups(ctx);
   const guides = findGuides(ctx.items);
