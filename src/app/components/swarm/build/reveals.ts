@@ -35,6 +35,15 @@ export function wasRevealCalled(): boolean {
  */
 export function hideBody(): void {
   document.body.style.opacity = "0";
+  // (Re-)apply the pre-show guard: Strict Mode's first-run cleanup calls
+  // showBody() which strips the class, and the second run must restore it —
+  // it keeps the scrollbar invisible and the html backdrop painted while
+  // the intro owns the screen. Removed again by showBody() at reveal.
+  try {
+    document.documentElement.classList.add("swarm-pending");
+  } catch {
+    /* ignore */
+  }
 }
 
 /**

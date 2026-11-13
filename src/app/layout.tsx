@@ -49,7 +49,11 @@ const SWARM_PRESHOW = `(function () {
       "background-image:linear-gradient(rgba(255,255,255,.06) 1px,transparent 1px)," +
       "linear-gradient(90deg,rgba(255,255,255,.06) 1px,transparent 1px)!important;" +
       "background-size:40px 40px!important;" +
-      "background-attachment:fixed!important;}" +
+      "background-attachment:fixed!important;" +
+      "scrollbar-color:transparent transparent;}" +
+      "html.swarm-pending::-webkit-scrollbar{background:transparent;}" +
+      "html.swarm-pending::-webkit-scrollbar-thumb{background:transparent;}" +
+      "html.swarm-pending::-webkit-scrollbar-track{background:transparent;}" +
       "html.swarm-pending>body{opacity:0!important;}";
     document.head.appendChild(st);
     document.documentElement.classList.add("swarm-pending");
