@@ -141,8 +141,8 @@ export class Engine implements RoutineHost {
   private lastT: { x: number; y: number } | null = null;
 
   private rulers = { want: 0, t: 0, lastNeed: -10 };
-  private tourV = 0;
-  private tourAcc = 0;
+  private hop: { from: number; dest: number; t: number; dur: number } | null = null;
+  private lastDispatchAt = 0;
   private finaleStart = 0;
 
   private clackCool = 0;
@@ -419,7 +419,13 @@ export class Engine implements RoutineHost {
         ).length,
         elapsed: Math.round(this.elapsed),
         scrollY: Math.round(window.scrollY),
-        tourV: Math.round(this.tourV),
+        hop:
+          this.hop == null
+            ? null
+            : {
+                dest: Math.round(this.hop.dest),
+                p: Math.round((this.hop.t / this.hop.dur) * 100) / 100,
+              },
         frontier: Math.round(this.frontier),
         flocking: this.flocking,
       });
@@ -681,6 +687,7 @@ export class Engine implements RoutineHost {
         if (ix >= 0) avail.splice(ix, 1);
         t.state = "active";
         this.waitCount--;
+        this.lastDispatchAt = this.time;
         t.owner = c;
         this.taskOfCursor.set(c, t);
         c.worked = true;
@@ -794,33 +801,34 @@ export class Engine implements RoutineHost {
     }
     const vh = window.innerHeight;
     const maxY = this.capture.docH - vh;
-    if (window.scrollY >= maxY - 1) {
-      this.tourV = 0;
+    const sy = window.scrollY;
+    if (sy >= maxY - 1) {
+      this.hop = null;
       return;
     }
-    const crew = Math.max(this.profile.agentMin, this.cursors.filter((c) => !c.leaving).length);
-    const backlog = this.backlog();
-    // Zero backlog = frontier is ahead of all buildable work → skip the gap fast.
-    const gapTier =
-      backlog === 0
-        ? 900
-        : backlog <= 3
-          ? 170
-          : backlog <= Math.max(3, crew * 0.6)
-            ? 95
-            : backlog <= crew * 1.6
-              ? 45
-              : 0;
-    // Late in the build (long page), gently rush the tour so pacing scales
-    // with page length instead of the fixed reference demo's 1-2 screens.
-    const rush = 1 + Math.min(0.9, (this.elapsed / Math.max(1, this.profile.durationMax)) * 1.1);
-    const target = gapTier === 0 ? 0 : gapTier > 400 ? gapTier : gapTier * rush;
-    this.tourV += (target - this.tourV) * Math.min(1, dt * 2.5);
-    this.tourAcc += this.tourV * dt;
-    if (this.tourAcc >= 1) {
-      const d = Math.floor(this.tourAcc);
-      this.tourAcc -= d;
-      window.scrollBy(0, d);
+
+    // Stay-and-paint / hop model: the camera NEVER glides. It locks in place
+    // while unlocked work is being painted (cursors drawing dominate the
+    // view), then flicks one full viewport when that viewport is drained.
+    // A hop completes even if new tasks unlock mid-flight — work paints after
+    // arrival. A long stall with no dispatches (dep-gated tasks) hops anyway
+    // to advance the frontier and unstick the pipeline.
+    if (this.hop) {
+      this.hop.t += dt;
+      const p = Math.min(1, this.hop.t / this.hop.dur);
+      const e = p * p * (3 - 2 * p);
+      window.scrollTo(0, Math.round(this.hop.from + (this.hop.dest - this.hop.from) * e));
+      if (p >= 1) this.hop = null;
+      return;
+    }
+
+    const stalled = this.time - this.lastDispatchAt > 2.5 && this.backlog() > 0;
+    if (stalled || this.backlog() === 0) {
+      const dest = Math.min(sy + vh, maxY);
+      if (dest > sy) {
+        const dur = Math.min(0.9, Math.max(0.35, (dest - sy) / 900));
+        this.hop = { from: sy, dest, t: 0, dur };
+      }
     }
   }
 
