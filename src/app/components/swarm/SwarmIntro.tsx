@@ -115,6 +115,13 @@ export function SwarmIntro() {
       try {
         const policy = resolvePolicy(hasPlayed());
         if (policy.profile === "skip") {
+          // The inline pre-show guard mirrors these rules, but clear the
+          // class defensively in case of any policy mismatch.
+          try {
+            document.documentElement.classList.remove("swarm-pending");
+          } catch {
+            /* ignore */
+          }
           if (process.env.NODE_ENV === "development") {
             console.log(`[SwarmIntro] Skipped: ${policy.skipReason}`);
           }

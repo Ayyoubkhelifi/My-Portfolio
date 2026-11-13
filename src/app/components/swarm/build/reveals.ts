@@ -38,10 +38,18 @@ export function hideBody(): void {
 }
 
 /**
- * Unhides the page body. Idempotent.
+ * Unhides the page body. Idempotent. Also clears the inline pre-show guard
+ * (html.swarm-pending) added by the layout's first-paint script — every
+ * reveal/abort path funnels through here.
  */
 export function showBody(): void {
   document.body.style.opacity = "";
+  try {
+    const de = document.documentElement;
+    if (de.classList.contains("swarm-pending")) de.classList.remove("swarm-pending");
+  } catch {
+    /* ignore */
+  }
 }
 
 // ─── revealNow — emergency / skip / abort path ───────────────────────────────

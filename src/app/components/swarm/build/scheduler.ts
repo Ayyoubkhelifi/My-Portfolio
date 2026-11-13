@@ -143,6 +143,7 @@ export class Engine implements RoutineHost {
   private rulers = { want: 0, t: 0, lastNeed: -10 };
   private hop: { from: number; dest: number; t: number; dur: number } | null = null;
   private lastDispatchAt = 0;
+
   private finaleStart = 0;
 
   private clackCool = 0;
