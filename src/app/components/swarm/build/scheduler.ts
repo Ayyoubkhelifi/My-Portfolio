@@ -151,8 +151,6 @@ export class Engine implements RoutineHost {
 
   private rulers = { want: 0, t: 0, lastNeed: -10 };
   private hop: { from: number; dest: number; t: number; dur: number } | null = null;
-  private lastDispatchAt = 0;
-
   private finaleStart = 0;
   private finaleCamFrom = 0;
 
@@ -672,9 +670,15 @@ export class Engine implements RoutineHost {
 
     const avail = this.started ? this.available() : [];
     const crew = Math.max(1, this.cursors.filter((c) => !c.leaving).length);
+    // Endgame hurry: as the duration budget runs out, accelerate painting so
+    // the full page still completes naturally before the fail-safe has to
+    // force-finish anything. Ramps 1× → ~2× over the last 45% of the budget.
+    const over = this.elapsed / this.profile.durationMax;
+    const hurry = over > 0.55 ? 1 + Math.min(1, (over - 0.55) / 0.45) : 1;
     this.tempo =
       clamp(2.1 + this.vel / 900 + (avail.length / crew) * 0.5, 2.1, 4.5) *
-      this.profile.speed;
+      this.profile.speed *
+      (1 + hurry);
 
     // Duration fail-safe.
     if (!this.flocking && this.elapsed > this.profile.durationMax) {
@@ -758,7 +762,6 @@ export class Engine implements RoutineHost {
         if (ix >= 0) avail.splice(ix, 1);
         t.state = "active";
         this.waitCount--;
-        this.lastDispatchAt = this.time;
         t.owner = c;
         this.taskOfCursor.set(c, t);
         c.worked = true;
@@ -881,15 +884,14 @@ export class Engine implements RoutineHost {
       return;
     }
 
-    // Stay-and-paint / hop model (virtual camera): the camera NEVER glides.
-    // It locks in place while unlocked work is being painted (cursors drawing
-    // dominate the view), then flicks one full viewport when that viewport is
-    // drained. With progressive capture the camera may outpace the background
-    // capture — it then WAITS (no hop, no stall-drift) until the next
-    // viewport's band has been appended, so it never parks on a blank
-    // stretch. A long stall with no dispatches (dep-gated tasks) still hops
-    // to advance the frontier and unstick the pipeline — but only if work
-    // exists below (or the capture is finished).
+    // Stay-and-paint / hop model (virtual camera): the camera NEVER glides
+    // and NEVER scrolls mid-work. It locks in place until EVERY unlocked
+    // task is finished (backlog drained — including ones still being
+    // painted), then flicks one full viewport — and only if the next
+    // viewport has data (workAhead) or the capture is finished. With
+    // progressive capture the camera may outpace the background capture —
+    // it then WAITS (no hop, no stall-drift) until the next viewport's band
+    // has been appended, so it never parks on a blank stretch.
     if (this.hop) {
       this.hop.t += dt;
       const p = Math.min(1, this.hop.t / this.hop.dur);
@@ -900,8 +902,7 @@ export class Engine implements RoutineHost {
     }
 
     const ahead = this.workAhead();
-    const stalled = this.time - this.lastDispatchAt > 2.5 && this.backlog() > 0;
-    if ((stalled || this.backlog() === 0) && (ahead || this.captureDone)) {
+    if (this.backlog() === 0 && (ahead || this.captureDone)) {
       const dest = Math.min(sy + vh, maxY);
       if (dest > sy) {
         const dur = Math.min(0.9, Math.max(0.35, (dest - sy) / 900));
