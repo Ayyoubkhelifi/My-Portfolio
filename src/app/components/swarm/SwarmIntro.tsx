@@ -5,7 +5,8 @@
  *
  *   1. Policy check (state/policy.ts) — skip rules, profile, seed
  *   2. Hide the page (visibility:hidden — zero CLS, no flash)
- *   3. Capture: hidden sweep + world-coords item snapshot
+ *   3. Engine starts on an empty plan — the crew flies in and orbits while
+ *      the hidden sweep + band walk stream data in (progressive capture)
  *   4. Mount the stage + cursor swarm + controls
  *   5. Engine drives everything until the build completes
  *   6. Finale → cross-fade finalReveal → cleanup
