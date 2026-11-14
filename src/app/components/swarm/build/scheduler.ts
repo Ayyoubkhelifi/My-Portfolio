@@ -109,6 +109,11 @@ export class Engine implements RoutineHost {
   private groups: DupGroup[];
   private guides: Guide[] = [];
   private guideDeps = new Map<Guide, Task[]>();
+  /** Item → task map, persistent across progressive band appends (parents
+   *  captured in an earlier band are referenced by later bands' children). */
+  private taskOfItem = new Map<SwarmItem, Task>();
+  /** True once the background capture has produced its final band. */
+  private captureDone = false;
 
   // agents
   private cursors: Cursor[] = [];
@@ -127,6 +132,10 @@ export class Engine implements RoutineHost {
   private flocking = false;
   private elapsed = 0;
 
+  /** Virtual camera (world Y the overlay renders at). The real page scroll
+   *  belongs to the background capture while building; the overlay must not
+   *  move with it. */
+  private camY = 0;
   private time = 0;
   private tempo = 2.1;
   private frontier = 0;
@@ -145,6 +154,7 @@ export class Engine implements RoutineHost {
   private lastDispatchAt = 0;
 
   private finaleStart = 0;
+  private finaleCamFrom = 0;
 
   private clackCool = 0;
   private hudCool = 0;
@@ -178,7 +188,7 @@ export class Engine implements RoutineHost {
       const x = window.scrollX + (fromLeft
         ? -40 - randRange(this.rand, 0, 200)
         : window.innerWidth + 40 + randRange(this.rand, 0, 200));
-      const y = window.scrollY + randRange(this.rand, 0.05, 0.95) * window.innerHeight;
+      const y = this.camY + randRange(this.rand, 0.05, 0.95) * window.innerHeight;
       this.cursors.push(this.makeCursor(x, y, n < profile.agentMin, true));
     }
   }
@@ -193,11 +203,43 @@ export class Engine implements RoutineHost {
   // ── Plan ──────────────────────────────────────────────────────────────────
 
   buildPlan(): void {
-    const items = this.capture.items;
-    const groups = this.groups;
+    this.planItems(this.capture.items, this.capture.groups);
+    this.waitCount = this.tasks.length;
+    if (process.env.NODE_ENV === "development") {
+      console.log(
+        `[SwarmIntro] plan: ${this.tasks.length} tasks, ${this.groups.length} groups, ${this.guides.length} guides`
+      );
+    }
+  }
 
+  /**
+   * Progressive capture: appends one band's items to the plan. Called while
+   * the engine is already running — the camera waits at the frontier until
+   * the next band's work exists (tourStep's workAhead gate).
+   */
+  appendBand(band: { items: SwarmItem[]; groups: DupGroup[]; done: boolean }): void {
+    if (this.aborted) return;
+    const before = this.tasks.length;
+    this.planItems(band.items, band.groups);
+    this.waitCount += this.tasks.length - before;
+    this.groups = this.groups.concat(band.groups);
+    if (band.done) this.captureDone = true;
+    if (process.env.NODE_ENV === "development") {
+      console.log(
+        `[SwarmIntro] band append: +${this.tasks.length - before} tasks (total ${this.tasks.length}, done=${band.done})`
+      );
+    }
+  }
+
+  /** Updates the document geometry after the sweep (lazy content growth). */
+  setDoc(docW: number, docH: number): void {
+    this.capture = { ...this.capture, docW, docH };
+  }
+
+  /** Shared per-item planning pipeline (used by buildPlan and appendBand). */
+  private planItems(items: SwarmItem[], groups: DupGroup[]): void {
     // ── 1. One build task per non-copy item, in capture (DOM) order.
-    const taskOfItem = new Map<SwarmItem, Task>();
+    const taskOfItem = this.taskOfItem;
     const mk = (y: number, type: TaskType, deps: Task[]): Task => {
       const t: Task = {
         id: this.tasks.length,
@@ -388,20 +430,13 @@ export class Engine implements RoutineHost {
 
     // ── 7. Create all item nodes up front (one batch of simple divs).
     for (const it of items) this.view.createNode(it);
-
-    this.waitCount = this.tasks.length;
-    if (process.env.NODE_ENV === "development") {
-      console.log(
-        `[SwarmIntro] plan: ${this.tasks.length} tasks, ${groups.length} groups, ${this.guides.length} guides`
-      );
-    }
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   start(): void {
     if (this.rafId !== null || this.aborted) return;
-    this.frontier = window.scrollY + window.innerHeight;
+    this.frontier = this.camY + window.innerHeight;
     this.lastTs = null;
     if (process.env.NODE_ENV === "development") {
       let pulses = 0;
@@ -419,7 +454,8 @@ export class Engine implements RoutineHost {
           (t) => t.state === "wait" && t.gate <= this.frontier && t.deps.some((d) => d.state !== "done")
         ).length,
         elapsed: Math.round(this.elapsed),
-        scrollY: Math.round(window.scrollY),
+        camY: Math.round(this.camY),
+        captureDone: this.captureDone,
         hop:
           this.hop == null
             ? null
@@ -447,10 +483,21 @@ export class Engine implements RoutineHost {
       };
     }
     this.rafId = requestAnimationFrame(this.tickFrame);
-    // Let the opening flock gather before the build starts.
+    // Let the opening flock gather, then wait until the progressive capture
+    // has produced the first band's data before releasing the crew to work.
+    this.scheduleBegin(0);
+  }
+
+  /** Release the flock into work mode once the first band data exists. */
+  private scheduleBegin(attempt: number): void {
     window.setTimeout(() => {
-      if (!this.aborted && !this.paused) this.beginBuild();
-    }, 1150);
+      if (this.aborted || this.paused) return;
+      if (this.tasks.length === 0 && attempt < 240) {
+        this.scheduleBegin(attempt + 1);
+        return;
+      }
+      this.beginBuild();
+    }, attempt === 0 ? 1150 : 250);
   }
 
   /** Release the flock into work mode (the build begins). */
@@ -519,6 +566,13 @@ export class Engine implements RoutineHost {
     this.mouse = { x, y };
   }
 
+  /** Instant camera return to the hero — called right before a reveal so the
+   *  overlay cross-fade starts from the top of the built page. */
+  snapTop(): void {
+    this.camY = 0;
+    this.hop = null;
+  }
+
   clearMouse(): void {
     this.mouse = null;
   }
@@ -536,7 +590,7 @@ export class Engine implements RoutineHost {
     this.tourStep(dtRaw);
 
     const sx = window.scrollX;
-    const sy = window.scrollY;
+    const sy = this.camY;
     this.view.pan(sx, sy);
     this.view.renderOverlay(this.collectSpecs(), this.guides, this.editLines, sx, sy);
     this.view.renderCursors(this.cursors, sx, sy);
@@ -589,18 +643,32 @@ export class Engine implements RoutineHost {
   private step(dtRaw: number): void {
     const dt = Math.min(dtRaw, 0.05);
     this.time += dt;
-    const sy = window.scrollY;
+    const sy = this.camY;
     const vh = window.innerHeight;
     const viewBot = sy + vh;
 
-    // Smooth scroll velocity (drives tempo + demo pace).
+    // Smooth camera velocity (drives tempo + demo pace).
     const sv = this.lastScroll == null ? 0 : Math.abs(sy - this.lastScroll) / Math.max(dt, 0.001);
     this.lastScroll = sy;
     this.vel = Math.max(this.vel * Math.exp(-dt * 1.2), this.vel * 0.7 + sv * 0.3);
 
     if (this.started) this.frontier = Math.max(this.frontier, viewBot);
 
-    if (this.tasks.length === 0) return;
+    // Duration fail-safe — must run even before any band data exists
+    // (a hung capture would otherwise leave the crew orbiting forever).
+    if (!this.flocking && this.elapsed > this.profile.durationMax) {
+      this.forceRevealRemaining();
+      return;
+    }
+
+    if (this.tasks.length === 0) {
+      // No band data yet: keep the intro crew orbiting the viewport center.
+      if (!this.started) {
+        const center = { x: window.scrollX + window.innerWidth / 2, y: this.camY + vh / 2 };
+        this.follow(dt, this.cursors, center, 0.7);
+      }
+      return;
+    }
 
     const avail = this.started ? this.available() : [];
     const crew = Math.max(1, this.cursors.filter((c) => !c.leaving).length);
@@ -633,8 +701,9 @@ export class Engine implements RoutineHost {
       }
     }
 
-    // Finale trigger: every task has been dispatched at least once.
-    if (!this.flocking && this.started && this.waitCount === 0) {
+    // Finale trigger: every task has been dispatched at least once and the
+    // background capture has produced its final band.
+    if (!this.flocking && this.started && this.waitCount === 0 && this.captureDone) {
       for (const c of this.cursors) {
         if (!this.taskOfCursor.has(c) && !c.follow) {
           c.follow = true;
@@ -647,6 +716,7 @@ export class Engine implements RoutineHost {
       if (this.cursors.every((c) => c.follow)) {
         this.flocking = true;
         this.finaleStart = this.time;
+        this.finaleCamFrom = this.camY;
         this.view.hudFade();
         this.doneCount = this.tasks.length;
         this.cb.onComplete();
@@ -658,7 +728,7 @@ export class Engine implements RoutineHost {
     }
 
     if (!this.started) {
-      const center = { x: window.scrollX + window.innerWidth / 2, y: window.scrollY + vh / 2 };
+      const center = { x: window.scrollX + window.innerWidth / 2, y: this.camY + vh / 2 };
       this.follow(dt, this.cursors, center, 0.7);
       return;
     }
@@ -673,7 +743,7 @@ export class Engine implements RoutineHost {
     if (this.cursors.filter((c) => !c.leaving).length < want && this.spawnCooldown <= 0) {
       const fromLeft = this.rand() < 0.5;
       const x = window.scrollX + (fromLeft ? -40 : window.innerWidth + 40);
-      const y = window.scrollY + randRange(this.rand, 0.2, 0.8) * vh;
+      const y = this.camY + randRange(this.rand, 0.2, 0.8) * vh;
       this.cursors.push(this.makeCursor(x, y, false));
       this.spawnCooldown = 0.035;
     }
@@ -773,8 +843,8 @@ export class Engine implements RoutineHost {
   private pick(c: Cursor, avail: Task[]): Task | null {
     let best: Task | null = null;
     let bestS = Number.POSITIVE_INFINITY;
-    const top = window.scrollY - 40;
-    const bot = window.scrollY + window.innerHeight;
+    const top = this.camY - 40;
+    const bot = this.camY + window.innerHeight;
     const cy = c.y;
     for (const t of avail) {
       const y = t.y;
@@ -797,40 +867,55 @@ export class Engine implements RoutineHost {
   private tourStep(dt: number): void {
     if (!this.started || this.aborted) return;
     if (this.flocking) {
-      // drift back to the top during the finale
+      // Drift the camera back to the hero during the finale so the
+      // cross-fade reveal starts from (or near) the top of the build.
+      const p = Math.min(1, (this.time - this.finaleStart) / 2.2);
+      this.camY = (1 - p * p * (3 - 2 * p)) * this.finaleCamFrom;
       return;
     }
     const vh = window.innerHeight;
     const maxY = this.capture.docH - vh;
-    const sy = window.scrollY;
+    const sy = this.camY;
     if (sy >= maxY - 1) {
       this.hop = null;
       return;
     }
 
-    // Stay-and-paint / hop model: the camera NEVER glides. It locks in place
-    // while unlocked work is being painted (cursors drawing dominate the
-    // view), then flicks one full viewport when that viewport is drained.
-    // A hop completes even if new tasks unlock mid-flight — work paints after
-    // arrival. A long stall with no dispatches (dep-gated tasks) hops anyway
-    // to advance the frontier and unstick the pipeline.
+    // Stay-and-paint / hop model (virtual camera): the camera NEVER glides.
+    // It locks in place while unlocked work is being painted (cursors drawing
+    // dominate the view), then flicks one full viewport when that viewport is
+    // drained. With progressive capture the camera may outpace the background
+    // capture — it then WAITS (no hop, no stall-drift) until the next
+    // viewport's band has been appended, so it never parks on a blank
+    // stretch. A long stall with no dispatches (dep-gated tasks) still hops
+    // to advance the frontier and unstick the pipeline — but only if work
+    // exists below (or the capture is finished).
     if (this.hop) {
       this.hop.t += dt;
       const p = Math.min(1, this.hop.t / this.hop.dur);
       const e = p * p * (3 - 2 * p);
-      window.scrollTo(0, Math.round(this.hop.from + (this.hop.dest - this.hop.from) * e));
+      this.camY = this.hop.from + (this.hop.dest - this.hop.from) * e;
       if (p >= 1) this.hop = null;
       return;
     }
 
+    const ahead = this.workAhead();
     const stalled = this.time - this.lastDispatchAt > 2.5 && this.backlog() > 0;
-    if (stalled || this.backlog() === 0) {
+    if ((stalled || this.backlog() === 0) && (ahead || this.captureDone)) {
       const dest = Math.min(sy + vh, maxY);
       if (dest > sy) {
         const dur = Math.min(0.9, Math.max(0.35, (dest - sy) / 900));
         this.hop = { from: sy, dest, t: 0, dur };
       }
     }
+  }
+
+  /** Would hopping one viewport down unlock new work? False while the
+   *  background capture is still producing the next band (the camera waits). */
+  private workAhead(): boolean {
+    const next = this.camY + 2 * window.innerHeight;
+    for (const t of this.tasks) if (t.state === "wait" && t.gate <= next) return true;
+    return false;
   }
 
   /** Unfinished work already unlocked by the frontier. */
@@ -844,11 +929,11 @@ export class Engine implements RoutineHost {
 
   private flockTarget(): { x: number; y: number } {
     if (this.mouse)
-      return { x: this.mouse.x - window.scrollX, y: this.mouse.y - window.scrollY };
+      return { x: this.mouse.x - window.scrollX, y: this.mouse.y - this.camY };
     const t = this.time;
     return {
       x: window.scrollX + window.innerWidth * (0.5 + 0.28 * Math.sin(t * 0.37)),
-      y: window.scrollY + window.innerHeight * (0.5 + 0.25 * Math.sin(t * 0.53 + 1)),
+      y: this.camY + window.innerHeight * (0.5 + 0.25 * Math.sin(t * 0.53 + 1)),
     };
   }
 
@@ -857,7 +942,7 @@ export class Engine implements RoutineHost {
     if (this.cursors.length < this.profile.agentMax && this.spawnCooldown <= 0) {
       const fromLeft = this.rand() < 0.5;
       const x = window.scrollX + (fromLeft ? -30 : window.innerWidth + 30);
-      const y = window.scrollY + randRange(this.rand, 0.1, 0.9) * window.innerHeight;
+      const y = this.camY + randRange(this.rand, 0.1, 0.9) * window.innerHeight;
       this.cursors.push(this.makeCursor(x, y, false, true));
       this.spawnCooldown = 0.04;
     }
@@ -872,7 +957,7 @@ export class Engine implements RoutineHost {
     scale = 1
   ): boolean {
     const m = this.mouse
-      ? { x: this.mouse.x - window.scrollX, y: this.mouse.y - window.scrollY }
+      ? { x: this.mouse.x - window.scrollX, y: this.mouse.y - this.camY }
       : null;
     const o = target ?? this.flockTarget();
     const time = this.time;
@@ -1038,19 +1123,19 @@ export class Engine implements RoutineHost {
   }
 
   viewTop(): number {
-    return window.scrollY;
+    return this.camY;
   }
 
   viewBot(): number {
-    return window.scrollY + window.innerHeight;
+    return this.camY + window.innerHeight;
   }
 
   fromViewport(x: number, y: number): { x: number; y: number } {
-    return { x: window.scrollX + x, y: window.scrollY + y };
+    return { x: window.scrollX + x, y: this.camY + y };
   }
 
   scr(c: Cursor): { x: number; y: number } {
-    return { x: c.x - window.scrollX, y: c.y - window.scrollY };
+    return { x: c.x - window.scrollX, y: c.y - this.camY };
   }
 
   bump(it: SwarmItem): void {
@@ -1154,7 +1239,7 @@ export class Engine implements RoutineHost {
   dragEnd(c: Cursor, it: SwarmItem): { x: number; y: number } {
     void c;
     const right = window.scrollX + window.innerWidth;
-    const bot = window.scrollY + window.innerHeight;
+    const bot = this.camY + window.innerHeight;
     const x =
       it.x + it.w > right - 16 ? Math.max(it.x + Math.min(it.w, 40), right - 30) : it.x + it.w;
     const y =
@@ -1245,7 +1330,7 @@ export class Engine implements RoutineHost {
       window.scrollX + (right ? window.innerWidth + 60 : -60);
     yield* this.gMove(
       c,
-      () => ({ x: sideX(), y: c.y - this.viewTop() + window.scrollY }),
+      () => ({ x: sideX(), y: c.y - this.viewTop() + this.camY }),
       { speed: 0.8 }
     );
   }

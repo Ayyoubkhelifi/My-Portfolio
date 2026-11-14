@@ -19,7 +19,7 @@
  */
 
 import { checkExclusion } from "./exclusions";
-import type { CaptureResult, ClipBox, DupGroup, SwarmItem, TypeUnit } from "./model";
+import type { ClipBox, DupGroup, SwarmItem, TypeUnit } from "./model";
 import { waitForScrollSettle } from "./sweep";
 
 // ─── Tuning ───────────────────────────────────────────────────────────────────
@@ -701,30 +701,6 @@ function maxRatio(a: number, b: number): number {
   return l / s;
 }
 
-// ─── Guides ───────────────────────────────────────────────────────────────────
-
-/** Text starts snap to columns formed by earlier text items (±10px). */
-function findGuides(items: SwarmItem[]): CaptureResult["guides"] {
-  const guides: CaptureResult["guides"] = [];
-  const textItems = items.filter((it) => it.kind === "text" && it.w > 40);
-  for (const item of textItems) {
-    const snapX = item.x;
-    const anchors = textItems.filter((t) => t !== item && Math.abs(t.x - snapX) <= 12);
-    if (anchors.length >= 1) {
-      guides.push({ axis: "x", pos: item.x, flash: 0, op: 0 });
-    }
-    if (guides.length >= 8) break;
-  }
-  // Dedupe identical positions
-  const seen = new Set<number>();
-  return guides.filter((g) => {
-    const key = Math.round(g.pos);
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-}
-
 // ─── Main capture ─────────────────────────────────────────────────────────────
 
 const BATCH = 32;
@@ -812,97 +788,96 @@ export function quickStage(): {
  *              starts; without this, the orphaned capture kept scrolling
  *              the now-visible page for tens of seconds).
  */
-export async function captureItems(aborted?: () => boolean): Promise<CaptureResult> {
+export interface BandResult {
+  items: SwarmItem[];
+  groups: DupGroup[];
+  done: boolean;
+}
+
+export interface CaptureSession {
+  /** Hidden sweep + first (visible) band. Returns null on abort. */
+  first(): Promise<{
+    items: SwarmItem[];
+    groups: DupGroup[];
+    docW: number;
+    docH: number;
+    bgColor: string;
+  } | null>;
+  /** Capture the next band below. `done` when the document is exhausted. */
+  next(): Promise<BandResult | null>;
+}
+
+/**
+ * Progressive capture session: the engine can start on the first band while
+ * the remaining bands are captured in the background. Each band is walked
+ * exactly like the legacy one-shot capture (settle → drain → band walk);
+ * groups are discovered per band (a group spanning a band boundary degrades
+ * to independent items — visually equivalent choreography).
+ */
+export function startCaptureSession(aborted?: () => boolean): CaptureSession {
   const isAbort = (): boolean => aborted?.() ?? false;
   const t0 = performance.now();
   const log = (m: string) => {
     if (process.env.NODE_ENV === "development") console.log(`[capture] ${m}`);
   };
-  // Pass 1 — quick scroll sweep: force lazy images + kick off entrance
-  // animations (the stage overlay already covers the viewport by now).
-  const { sy, sx } = await waitForScrollSettle(isAbort);
-  void sy;
-  void sx;
-  log(`sweep ${Math.round(performance.now() - t0)}ms`);
-  if (isAbort()) {
-    return {
+
+  let ctx: WalkCtx | null = null;
+  let docW = 0;
+  let docH = 0;
+  let bgColor = "";
+  let vh = 0;
+  let maxScroll = 0;
+  let step = 0;
+  let y = 0;
+  let prepared = false;
+  let finished = false;
+  let countPending: (bandTop: number, bandBot: number) => number = () => 0;
+  let rootChildren: Element[] = [];
+
+  /** Hidden sweep: forces lazy content + entrance animations. */
+  async function sweepAndPrep(): Promise<boolean> {
+    await waitForScrollSettle(isAbort);
+    log(`sweep ${Math.round(performance.now() - t0)}ms`);
+    if (isAbort()) return false;
+
+    docW = document.documentElement.scrollWidth;
+    docH = document.documentElement.scrollHeight;
+
+    ctx = {
+      sy: 0,
+      sx: window.scrollX,
+      w: docW,
+      clip: null,
+      parent: null,
       items: [],
       groups: [],
-      guides: [],
-      docW: document.documentElement.scrollWidth,
-      docH: document.documentElement.scrollHeight,
-      bgColor: "",
+      nextId: { id: 1 },
+      band: null,
+      captured: new WeakSet<Element>(),
     };
+
+    const bodyCs = window.getComputedStyle(document.body);
+    bgColor = bodyCs.backgroundColor === "rgba(0, 0, 0, 0)"
+      ? window.getComputedStyle(document.documentElement).backgroundColor
+      : bodyCs.backgroundColor;
+
+    vh = window.innerHeight;
+    maxScroll = Math.max(0, docH - vh);
+    step = Math.max(120, vh);
+    y = 0;
+    prepared = true;
+    return true;
   }
 
-  // Post-sweep geometry (lazy content may have grown the document).
-  const docW = document.documentElement.scrollWidth;
-  const docH = document.documentElement.scrollHeight;
+  /** Captures exactly one band and returns its items + band-local groups. */
+  async function captureBand(): Promise<BandResult | null> {
+    if (!ctx || !prepared || finished || isAbort()) return null;
+    const BAND_SETTLE_MS = 150;
 
-  const ctx: WalkCtx = {
-    sy: 0,
-    sx,
-    w: docW,
-    clip: null,
-    parent: null,
-    items: [],
-    groups: [],
-    nextId: { id: 1 },
-    band: null,
-    captured: new WeakSet<Element>(),
-  };
-
-  // body's own background color becomes the stage color
-  const bodyCs = window.getComputedStyle(document.body);
-  const bgColor = bodyCs.backgroundColor === "rgba(0, 0, 0, 0)"
-    ? window.getComputedStyle(document.documentElement).backgroundColor
-    : bodyCs.backgroundColor;
-
-  // Pass 2 — per-band capture: for each viewport band, scroll it into view,
-  // let scroll-reveal animations settle, then walk THAT band. Elements read
-  // their final (fully revealed) styles this way; `captured` de-dupes.
-  const vh = window.innerHeight;
-  const maxScroll = Math.max(0, docH - vh);
-  const STEP = Math.max(120, vh);
-  const BAND_SETTLE_MS = 150;
-
-  // Scroll-reveal nodes (framer-motion sets inline opacity/transform styles).
-  // Most keep animating after the fixed settle; poll until the pending count
-  // drains — but stop early when the count stagnates (hover-reactive layers
-  // stay at partial opacity forever and must not stall the capture).
-  const revealNodes = Array.from(
-    document.querySelectorAll<HTMLElement>('[style]')
-  ).filter((el) => {
-    const s = el.getAttribute("style") ?? "";
-    return s.includes("opacity") || s.includes("transform");
-  });
-  // Precompute world-space tops once: rect.top + scrollY is scroll-invariant,
-  // so each drain poll filters numerically instead of calling
-  // getBoundingClientRect on every framer-styled element (the dominant
-  // per-poll cost — hundreds of elements × up to 5 polls × 12 bands).
-  const revealPos = revealNodes.map((el) => {
-    const r = el.getBoundingClientRect();
-    return { el, top: r.top + window.scrollY, h: r.height, w: r.width };
-  });
-  const countPending = (bandTop: number, bandBot: number): number => {
-    let n = 0;
-    for (const { el, top, h, w } of revealPos) {
-      if (h <= 0 || w <= 0) continue;
-      if (top + h < bandTop - 60 || top > bandBot + 60) continue;
-      const cs = window.getComputedStyle(el);
-      const op = parseFloat(cs.opacity || "1");
-      if (op < 0.92 && cs.animationName === "none") n++;
-    }
-    return n;
-  };
-
-  const rootChildren = Array.from(document.body.children);
-  let bandMs = 0;
-  for (let y = 0; ; y += STEP) {
-    if (isAbort()) break;
     const bandY = Math.min(y, maxScroll);
     window.scrollTo(0, bandY);
     await new Promise<void>((resolve) => setTimeout(resolve, BAND_SETTLE_MS));
+
     // Drain staggered entrance animations for this band. Two consecutive
     // equal counts = stagnated (hover-reactive layers rest at partial
     // opacity forever) — break instead of stalling the capture.
@@ -918,7 +893,8 @@ export async function captureItems(aborted?: () => boolean): Promise<CaptureResu
         prev = now;
       }
     }
-    bandMs = 0;
+
+    const emittedBefore = ctx.items.length;
     ctx.sy = window.scrollY;
     ctx.sx = window.scrollX;
     ctx.band = { top: bandY, bot: bandY + vh };
@@ -927,6 +903,7 @@ export async function captureItems(aborted?: () => boolean): Promise<CaptureResu
     // every item in this band).
     ctx.clip = null;
     ctx.parent = null;
+    let bandMs = 0;
     let batch = 0;
     for (const child of rootChildren) {
       const tb = performance.now();
@@ -937,24 +914,67 @@ export async function captureItems(aborted?: () => boolean): Promise<CaptureResu
       }
       bandMs += performance.now() - tb;
     }
-    log(`band@${bandY} items=${ctx.items.length} walk=${Math.round(bandMs)}ms total=${Math.round(performance.now() - t0)}ms`);
-    if (bandY >= maxScroll) break;
+    log(`band@${bandY} +${ctx.items.length - emittedBefore} items walk=${Math.round(bandMs)}ms total=${Math.round(performance.now() - t0)}ms`);
+
+    if (bandY >= maxScroll) finished = true;
+    else y += step;
+
+    // Band-local dup groups (slice view over the shared walk state).
+    const bandItems = ctx.items.slice(emittedBefore);
+    const sub: WalkCtx = {
+      ...ctx,
+      items: bandItems,
+      groups: [],
+    };
+    findGroups(sub);
+
+    return { items: bandItems, groups: sub.groups, done: finished };
   }
 
-  // Return to the top so the choreography (and the engine's frontier) start there.
-  window.scrollTo(0, 0);
-  if (!isAbort()) await new Promise<void>((resolve) => setTimeout(resolve, 150));
-
-  findGroups(ctx);
-  const guides = findGuides(ctx.items);
-
   return {
-    items: ctx.items,
-    groups: ctx.groups,
-    guides,
-    docW,
-    docH,
-    bgColor,
+    async first() {
+      if (!(await sweepAndPrep())) return null;
+
+      // Scroll-reveal nodes (framer-motion sets inline opacity/transform
+      // styles). Most keep animating after the fixed settle; the drain polls
+      // wait until the pending count drains — but stop early when the count
+      // stagnates (hover-reactive layers stay at partial opacity forever).
+      const revealNodes = Array.from(
+        document.querySelectorAll<HTMLElement>("[style]")
+      ).filter((el) => {
+        const s = el.getAttribute("style") ?? "";
+        return s.includes("opacity") || s.includes("transform");
+      });
+      // Precompute world-space tops once: rect.top + scrollY is
+      // scroll-invariant, so each drain poll filters numerically instead of
+      // calling getBoundingClientRect on every framer-styled element (the
+      // dominant per-poll cost — hundreds of elements × up to 5 polls × bands).
+      const revealPos = revealNodes.map((el) => {
+        const r = el.getBoundingClientRect();
+        return { el, top: r.top + window.scrollY, h: r.height, w: r.width };
+      });
+      countPending = (bandTop: number, bandBot: number): number => {
+        let n = 0;
+        for (const { el, top, h, w } of revealPos) {
+          if (h <= 0 || w <= 0) continue;
+          if (top + h < bandTop - 60 || top > bandBot + 60) continue;
+          const cs = window.getComputedStyle(el);
+          const op = parseFloat(cs.opacity || "1");
+          if (op < 0.92 && cs.animationName === "none") n++;
+        }
+        return n;
+      };
+
+      rootChildren = Array.from(document.body.children);
+
+      const band = await captureBand();
+      if (!band) return null;
+      return { items: band.items, groups: band.groups, docW, docH, bgColor };
+    },
+
+    async next() {
+      return captureBand();
+    },
   };
 }
 

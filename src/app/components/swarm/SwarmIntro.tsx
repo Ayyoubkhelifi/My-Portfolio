@@ -21,7 +21,7 @@
 import { useEffect } from "react";
 import { resolvePolicy, PROFILE_CONFIG } from "./state/policy";
 import { hasPlayed, markPlayed, resetPlayed, isSoundEnabled } from "./state/session";
-import { captureItems, quickStage } from "./capture/snapshot";
+import { startCaptureSession, quickStage } from "./capture/snapshot";
 import {
   hideBody,
   revealNow,
@@ -147,25 +147,24 @@ export function SwarmIntro() {
         hideBody();
         stage("hidden");
 
-        // 3. Capture (sweep + per-band walk happen under the stage surface).
-        //     Aborts immediately if the effect was disposed (Strict Mode
-        //     unmounts its first run — the orphan must not keep scrolling).
+        // 3. Progressive capture + early engine start. The engine launches on
+        //     an EMPTY plan so the crew flies in and orbits the hero while the
+        //     hidden sweep + band walk produce data in the background — cursors
+        //     are visible ~1s after the page hides instead of after the whole
+        //     page has been walked. Aborts immediately if the effect was
+        //     disposed (Strict Mode unmounts its first run — the orphan must
+        //     not keep scrolling).
         stage("capturing");
-        const capture = await captureItems(() => disposed);
-        if (disposed) return;
-        markPlayed();
-        stage("captured");
-        if (process.env.NODE_ENV === "development") {
-          console.log(
-            `[SwarmIntro] capture: ${capture.items.length} items, ${capture.groups.length} groups, doc ${capture.docW}x${capture.docH}`
-          );
-        }
-        if (capture.docH !== quick.docH || capture.docW !== quick.docW) {
-          view.resizeWorld(capture.docW, capture.docH);
-        }
-
-        // 4. Engine + controls.
-        engine = new Engine(view, sound, capture, config, policy.seed, {
+        const session = startCaptureSession(() => disposed);
+        const capture = {
+          items: [],
+          groups: [],
+          guides: [],
+          docW: quick.docW,
+          docH: quick.docH,
+          bgColor: quick.bg,
+        };
+        const engineRef = new Engine(view, sound, capture, config, policy.seed, {
           onComplete: () => {
             void handleComplete();
           },
@@ -175,9 +174,10 @@ export function SwarmIntro() {
             cleanup();
           },
         });
+        engine = engineRef;
 
-        engine.buildPlan();
-        engine.start();
+        engineRef.buildPlan();
+        engineRef.start();
         stage("engine-started");
 
         // The engine's pre-start flock follows the user's pointer.
@@ -227,6 +227,35 @@ export function SwarmIntro() {
           })
         );
 
+        // 6. Background capture: sweep + first band → append (the crew stops
+        //    orbiting and starts painting the hero), then walk the remaining
+        //    bands one at a time, appending each. The camera waits at the
+        //    frontier whenever the capture is behind (tourStep's workAhead
+        //    gate), so it never parks on an unbuilt stretch.
+        const first = await session.first();
+        if (disposed) return;
+        if (!first) return; // aborted — durationMax fail-safe covers the engine
+        markPlayed();
+        if (process.env.NODE_ENV === "development") {
+          console.log(
+            `[SwarmIntro] first band: ${first.items.length} items, ${first.groups.length} groups, doc ${first.docW}x${first.docH}`
+          );
+        }
+        if (first.docH !== quick.docH || first.docW !== quick.docW) {
+          view.resizeWorld(first.docW, first.docH);
+          engine.setDoc(first.docW, first.docH);
+        }
+        engine.appendBand({ items: first.items, groups: first.groups, done: false });
+
+        for (;;) {
+          const band = await session.next();
+          if (disposed) return;
+          if (!band) break;
+          engine.appendBand(band);
+          if (band.done) break;
+        }
+        stage("captured");
+
         // ── Completion: finale → cross-fade reveal ─────────────────────────
         async function handleComplete() {
           try {
@@ -254,6 +283,7 @@ export function SwarmIntro() {
             }
 
             stage("revealing");
+            engine?.snapTop();
             finalReveal();
             stage("revealed");
           } catch (err) {
